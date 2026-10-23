@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- BepInEx 6 (IL2CPP, be.790) plugin for Silver Pines (Steam build 25964535, Unity 6000.3.15f1).
+       Build: dotnet build -c Release   (GameDir / InteropDir can be overridden on the command line) -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>SilverPinesCoop</AssemblyName>
+    <RootNamespace>SilverPinesCoop</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Deterministic>true</Deterministic>
+    <DebugType>embedded</DebugType>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GameDir Condition="'$(GameDir)' == ''">D:\SteamLibrary\steamapps\common\Silver Pines</GameDir>
+    <BepInExCore Condition="'$(BepInExCore)' == ''">$(GameDir)\BepInEx\core</BepInExCore>
+    <InteropDir Condition="'$(InteropDir)' == ''">$(GameDir)\BepInEx\interop</InteropDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <Reference Include="$(BepInExCore)\BepInEx.Core.dll" Private="false" />
+    <Reference Include="$(BepInExCore)\BepInEx.Unity.Common.dll" Private="false" />
+    <Reference Include="$(BepInExCore)\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="$(BepInExCore)\MonoMod.RuntimeDetour.dll" Private="false" />
+    <Reference Include="$(BepInExCore)\MonoMod.Utils.dll" Private="false" />
+    <Reference Include="$(BepInExCore)\Il2CppInterop.Common.dll" Private="false" />
+    <Reference Include="$(BepInExCore)\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="$(InteropDir)\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="$(InteropDir)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\UnityEngine.IMGUIModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\UnityEngine.DirectorModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\UnityEngine.TextRenderingModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\CarpenterScripts.dll" Private="false" />
+  </ItemGroup>
+</Project>
