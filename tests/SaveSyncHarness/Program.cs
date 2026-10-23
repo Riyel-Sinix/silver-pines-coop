@@ -29,6 +29,9 @@ var tests = new (string Name, Action Run)[]
     ("host death after readiness cancels save before execute", () => DeathAfterReady(true)),
     ("guest death after readiness cancels save before execute", () => DeathAfterReady(false)),
     ("older same-session announcement cannot erase committed checkpoint", OldAnnouncement),
+    ("executing save resolves death requests after success or into explicit failure", SaveExecutingDeath),
+    ("session sequence restarts for a new epoch after reconnect", SequenceRestartsWithEpoch),
+    ("death during first save preparation cancels and keeps original load", FirstSavePrepareDeath),
 };
 var failures = 0;
 foreach (var test in tests)
@@ -450,4 +453,114 @@ static void OldAnnouncement()
     world.Replay(emptyAnnouncement);
     Check.Equal(token, world.Guest.State<ulong>("_checkpoint"), "old zero-token announcement cannot erase a committed checkpoint");
     Check.That(world.Guest.Config.LastCheckpointToken.Value.Length != 0, "old announcement cannot clear persisted checkpoint");
+}
+
+static void SaveExecutingDeath()
+{
+    var failures = new List<string>();
+    foreach (var deadHost in new[] { true, false })
+    {
+        using var world = new World();
+        world.BeginSave(4);
+        Check.That(world.Host.OperationFlag("Started") && world.Guest.OperationFlag("Started"), "both save operations have entered Executing");
+
+        var dead = deadHost ? world.Host : world.Guest;
+        dead.Run(() => dead.Globals.EventChannels.Player.PlayerDead.Raise());
+        world.Pump();
+
+        world.Guest.Run(() => world.Guest.Manager.CompleteSave());
+        world.Host.Run(() => world.Host.Manager.CompleteSave());
+        world.Until(() => (world.Host.Manager.Loads.Count == 1 && world.Guest.Manager.Loads.Count == 1) ||
+            world.Host.State<bool>("_blocked") || world.Guest.State<bool>("_blocked"));
+
+        if (world.Host.State<bool>("_blocked") || world.Guest.State<bool>("_blocked"))
+        {
+            failures.Add($"{(deadHost ? "host" : "guest")} death blocked despite successful save");
+            continue;
+        }
+
+        if (world.Host.State<ulong>("_checkpoint") == 0)
+            failures.Add($"{(deadHost ? "host" : "guest")} death left no committed rollback target");
+        if (world.Host.Manager.Loads.Count == 0 || world.Guest.Manager.Loads.Count == 0)
+            failures.Add($"{(deadHost ? "host" : "guest")} death was not queued as a joint load after save success");
+        else
+        {
+            if (world.Host.Manager.Loads[0] != 4 || world.Guest.Manager.Loads[0] != 4)
+                failures.Add($"{(deadHost ? "host" : "guest")} death did not load the newly completed shared slot");
+            if (!world.Host.HasOperation || !world.Guest.HasOperation)
+                failures.Add($"{(deadHost ? "host" : "guest")} death did not create a joint load transaction");
+        }
+    }
+
+    using (var failed = new World())
+    {
+        failed.BeginSave(4);
+        failed.Guest.Run(() => failed.Guest.Globals.EventChannels.Player.PlayerDead.Raise());
+        failed.Pump();
+        failed.Guest.Run(() => failed.Guest.Manager.CompleteSave(false));
+        failed.Advance();
+        Check.That(failed.Host.State<bool>("_blocked") && failed.Guest.State<bool>("_blocked"), "failed in-flight save cannot silently consume a death rollback");
+        Check.That(failed.Host.Pause.Held && failed.Guest.Pause.Held, "failed in-flight save requires explicit reconnect recovery");
+    }
+    Check.That(failures.Count == 0, string.Join("; ", failures));
+}
+
+static void FirstSavePrepareDeath()
+{
+    foreach (var deadHost in new[] { true, false })
+    {
+        using var world = new World();
+        world.Host.Run(world.Host.Sync.RequestSave);
+        world.Until(() => world.Host.OperationFlag("LocalReady") && world.Host.OperationFlag("RemoteReady"));
+        var dead = deadHost ? world.Host : world.Guest;
+        dead.Manager.Slots.Add(9);
+        dead.Run(() => dead.Globals.EventChannels.Player.PlayerDead.Raise());
+        world.Pump();
+        world.Advance();
+        Check.That(!world.Host.HasOperation && !world.Guest.HasOperation, "death cancels first checkpoint preparation on both nodes");
+        Check.Equal(0, world.Host.Manager.Saves.Count, "first checkpoint preparation cancelled before host IO");
+        Check.Equal(0, world.Guest.Manager.Saves.Count, "first checkpoint preparation cancelled before guest IO");
+        Check.That(!world.Host.State<bool>("_blocked") && !world.Guest.State<bool>("_blocked"), "cancelled first preparation does not block recovery");
+        dead.Run(() => dead.Manager.LoadGameFromSlot(9));
+        Check.Equal(1, dead.Manager.Loads.Count, "original death-menu load remains available after first preparation cancellation");
+        Check.Equal(9, dead.Manager.Loads[0], "original local selected slot remains usable");
+        Check.That(!world.Host.Pause.Held && !world.Guest.Pause.Held, "cancelled first preparation releases both holds");
+    }
+}
+
+static void SequenceRestartsWithEpoch()
+{
+    using var world = new World();
+    var oldSession = world.Sent.Last(x => x.Type == PacketType.CheckpointSession);
+    var oldEpoch = world.Host.State<ulong>("_epoch");
+    using (var stream = new MemoryStream())
+    using (var writer = new BinaryWriter(stream))
+    {
+        writer.Write(oldEpoch);
+        writer.Write(5u);
+        writer.Write(0UL);
+        writer.Write(-1);
+        world.Guest.Receive(new Message(oldSession.Sender, oldSession.Receiver, oldSession.Type, stream.ToArray()));
+    }
+    Check.Equal(5u, world.Guest.State<uint>("_lastSessionSequence"), "guest has accepted sequence five in the old epoch");
+
+    world.Disconnect();
+    world.Host.Net.PartnerId = 2;
+    world.Guest.Net.PartnerId = 1;
+    world.Advance();
+    Check.That(world.Host.State<ulong>("_epoch") != oldEpoch, "reconnect has a new host epoch");
+    var newAnnouncement = world.Sent.Last(x => x.Type == PacketType.CheckpointSession && x.Body.Length >= sizeof(ulong));
+    using var body = new MemoryStream(newAnnouncement.Body.Length);
+    using (var writer = new BinaryWriter(body, System.Text.Encoding.UTF8, true))
+    using (var reader = new BinaryReader(new MemoryStream(newAnnouncement.Body, false)))
+    {
+        writer.Write(reader.ReadUInt64());
+        reader.ReadUInt32();
+        writer.Write(1u);
+        writer.Write(reader.ReadUInt64());
+        writer.Write(reader.ReadInt32());
+    }
+    world.Replay(newAnnouncement with { Body = body.ToArray() });
+    Check.That(world.Guest.State<bool>("_ready"), "sequence one from the new epoch is accepted");
+    Check.That(world.Host.State<bool>("_ready"), "new epoch handshake completes on the host");
 }

@@ -181,6 +181,13 @@ namespace SilverPinesCoop.Sync
         {
             if (!InSteamCoop)
                 return false;
+            if (_checkpoint == 0 && _op?.Kind == Kind.Save && _op.Phase == Phase.Preparing &&
+                !_blocked && !_draining)
+            {
+                RequestLoad();
+                Show("尚无共同存档，本次按原版读取；共同存档后启用双方回档");
+                return false;
+            }
             if (_checkpoint == 0 && _op == null && !_blocked && !_draining)
             {
                 Show("尚无共同存档，本次按原版读取；共同存档后启用双方回档");
@@ -192,10 +199,9 @@ namespace SilverPinesCoop.Sync
 
         private void RequestLoad()
         {
-            if (!CanOperate || _checkpoint == 0)
+            if (!CanOperate)
             {
-                Show(_checkpoint == 0 ? "尚无共同存档，请从死亡菜单读取后再共同存档" :
-                    "共同回档尚未就绪，请查看联机状态");
+                Show("共同回档尚未就绪，请查看联机状态");
                 return;
             }
             if (_op?.Kind == Kind.Load)
@@ -212,6 +218,19 @@ namespace SilverPinesCoop.Sync
                     Fail("死亡时取消尚未开始的共同存档");
                     Send(PacketType.CheckpointLoadRequest, w => w.Write(_epoch));
                 }
+                return;
+            }
+            if (_op?.Kind == Kind.Save)
+            {
+                if (IsHost)
+                    _loadRequest = true;
+                else if (!Send(PacketType.CheckpointLoadRequest, w => w.Write(_epoch)))
+                    Show("无法通知房主共同回档");
+                return;
+            }
+            if (_checkpoint == 0)
+            {
+                Show("尚无共同存档，请从死亡菜单读取后再共同存档");
                 return;
             }
             if (IsHost)
@@ -337,7 +356,7 @@ namespace SilverPinesCoop.Sync
                 ClearCheckpoint();
                 _blocked = true; // late game callbacks cannot be mistaken for a new operation
                 _notice = $"共同{(load ? "回档" : "存档")}未完成：{reason}。按 F6 退出后重新联机";
-                _pause.SetOperationHold(load, _notice);
+                _pause.SetOperationHold(true, _notice);
             }
             else
             {
@@ -397,6 +416,7 @@ namespace SilverPinesCoop.Sync
             _notice = null;
             _nextSession = 0f;
             _lastRemoteId = 0;
+            _lastSessionSequence = 0;
             _pause.SetOperationHold(false);
         }
 
