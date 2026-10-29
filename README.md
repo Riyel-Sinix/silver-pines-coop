@@ -3,12 +3,13 @@
 BepInEx 6（IL2CPP，be.790）插件。走 Steam 大厅 + SteamNetworkingMessages，在同一个房间里能看到另一位玩家（2P 傀儡）。
 目标版本：Windows x64，Steam 构建 **25964535**，Unity 6000.3.15f1，metadata v39。双方都需要拥有游戏，并使用相同的游戏版本和 Mod 版本。
 
-当前候选版本 **0.4.0**。新增的共同存档与死亡共同回档尚未经过真实双人 Steam 联机验证，建议使用测试 profile，并保留独立存档备份。现有功能包括大厅、P2P 传输、玩家外观与位置同步、一个人双开测试，以及：
-- 暂停同步：一人打开暂停菜单或进入过场动画，其他人原地暂停，等他继续；
+当前候选版本 **0.5.0**。共同存档、死亡共同回档和共享储物箱尚未经过真实双人 Steam 联机验证，建议使用测试 profile，并保留独立存档备份。现有功能包括大厅、P2P 传输、玩家外观与位置同步、一个人双开测试，以及：
+- 暂停状态：暂停菜单和过场不会冻结队友；队友傀儡上方显示「正在暂停」或「正在看过场」；
 - 过场同步：在同一个房间时，一人触发过场，其他人一起播放同一段动画；
 - 世界同步：通过游戏自己的存档数据同步门、拾取物、可交互物、剧情触发、谜题等已观测到的状态变化；不在同一房间时也会记下，进入房间时生效，覆盖范围见「已知限制」；
 - 剧情变量同步（存档里的 是/否 变量）；
 - 怪物：同房间内的伤害和死亡同步（一边打死，两边都死）；
+- 共享储物箱：Steam 双人联机时，由房主协调箱内物品、数量和库存位置；个人背包仍各自独立；
 - 共同存档与回档：Steam 双人联机时，由房主协调双方保存各自的本地进度；任意一人死亡后，双方一起加载最近共同确认的存档。
 
 
@@ -16,8 +17,8 @@ BepInEx 6（IL2CPP，be.790）插件。走 Steam 大厅 + SteamNetworkingMessage
 
 从 [Releases](https://github.com/Riyel-Sinix/silver-pines-coop/releases) 下载：
 
-- `SilverPinesCoop-0.4.0-BepInEx-be790.zip`：完整 Windows 安装包，含 BepInEx be.790、.NET 运行时、Unity 基础库及插件。
-- `SilverPinesCoop-0.4.0-plugin-only.zip`：仅插件和双开工具，供已经安装相同版本 BepInEx 的用户使用。
+- `SilverPinesCoop-0.5.0-BepInEx-be790.zip`：完整 Windows 安装包，含 BepInEx be.790、.NET 运行时、Unity 基础库及插件。
+- `SilverPinesCoop-0.5.0-plugin-only.zip`：仅插件和双开工具，供已经安装相同版本 BepInEx 的用户使用。
 
 双方退出游戏，将安装包内容解压到含 `Carpenter.exe` 的游戏根目录，然后从 Steam 启动游戏。首次启动时 BepInEx 会生成 interop 文件，需要等待几分钟；普通玩家无需安装 .NET SDK。
 
@@ -37,7 +38,11 @@ BepInEx 6（IL2CPP，be.790）插件。走 Steam 大厅 + SteamNetworkingMessage
 
 好友接受邀请（游戏开着时收到 `GameLobbyJoinRequested_t`，没开时 Steam 带 `+connect_lobby <id>` 启动游戏）就会自动进房间。
 
-### 共同存档与死亡回档（0.4.0 候选）
+### 共享储物箱（0.5.0 候选）
+
+Steam 双人联机后，储物库存由房主作为协调方，连接时会把房主储物箱内容发给队友；之后任一方整理储物箱，变更会同步给另一方。物品定义、库存位置、数量和可序列化数值状态会一并传输。请避免两人同时打开并整理储物箱，以免同时修改时后到的整份库存覆盖先前改动。个人背包、地图和血量仍各自独立。本地双开测试共用一份存档，不能验证此功能。
+
+### 共同存档与死亡回档（0.4.0）
 
 首次联机时，两人先进入相同进度的本地存档。加入大厅后，任意一人按 F9 即可请求共同存档；原版存档流程选定槽位时，也会被插件接管为双方共同保存。操作期间双方暂停，自动交换就绪确认后，各自在自己的本地 profile 中保存到相同槽位索引。只有双方都收到游戏的写盘成功事件，才把它记为最近共同存档（checkpoint）。请等待状态栏显示双方完成，再继续游戏。
 
@@ -113,9 +118,10 @@ dotnet build -c Release -p:BepInExCore=<BepInEx be.790 解压目录>\BepInEx\cor
   一样）。本地血量下降就发 `MonsterDamage` 差值；对方用 `CharacterHealth.Health` 的 setter
   扣血，到 0 时走游戏自己的死亡流程（`OnDead`、死亡事件）。同时受击时可能遗漏尚未上报的本地伤害，见「已知限制」。
 - **暂停 / 过场（`PauseSync` / `CutsceneSync`）。** 各方发送本地是否打开暂停菜单（`GameMenu.SystemMenu | OptionsPage`）、
-  是否在过场中（`GameCutsceneManager.CutsceneActive` 或视频过场）。只要有别人处于这种状态，本地每帧把时间缩放设为 0 并显示提示；
-  对方继续后，由游戏的 `TimeScaleManager.UpdateTimeScale` 恢复。被冻结的一方不会把冻结发出去，所以不会互相锁死。
+  是否在过场中（`GameCutsceneManager.CutsceneActive` 或视频过场）。远端状态显示在对应傀儡上方，不改变本地时间缩放。
   过场开始时，把正在播放的 `PlayableDirector` 按“场景:层级路径”发出，同房间的人从同一时间点播放。
+- **共享储物箱。** `PersistentDataInventory` 的物品列表按物品定义 GUID、运行时类型和值字段同步；房主协调快照并在连接时下发初始内容。
+  主背包使用另一种 `PersistentDataMainInventory`，不会被共享。并发整理同一储物箱尚无冲突合并，建议一人操作完成后另一人再打开。
 - **切窗口不暂停。** `Team17.Suspend.SuspendService.OnFocusChanged` 失去焦点时会挂起游戏（弹暂停菜单）。联机或双开时，
   native detour 丢掉“失去焦点”这一次调用。获得焦点照常处理，服务内部的计数在 0 处截断，所以不会失衡。
 - **共同存读档（`SaveSync` / `SaveLoadHook`）。** 原生 detour 接管 `SaveDataManager.SaveGameInSlot`、`LoadGameFromSlot` 和 `LoadMostRecentSave`。
@@ -124,7 +130,7 @@ dotnet build -c Release -p:BepInExCore=<BepInEx be.790 解压目录>\BepInEx\cor
 - **2P 不闪、不消失。** 傀儡沿相机视线方向后移 0.05（`PuppetDepthOffset`），两个角色重叠时排序稳定；精灵在换房间后第一次
   查不到时，把所有已加载精灵建一次索引，查不到的帧保留上一帧（之前疾跑时对方会消失：这一帧本地还没画过，最多要等 2 秒才找到）。
 
-## 协议（ProtocolVersion 3，小端，第一个字节是 `PacketType`）
+## 协议（ProtocolVersion 4，小端，第一个字节是 `PacketType`）
 
 | 类型 | 通道 | 内容 |
 |---|---|---|
@@ -136,6 +142,7 @@ dotnet build -c Release -p:BepInExCore=<BepInEx be.790 解压目录>\BepInEx\cor
 | `WorldEntry` = 13 | 1 | 条目 key、类所在程序集、命名空间、类名（嵌套类用 `外/内`）、u16 长度 + 值字段字节 |
 | `StoryFlag` = 14 | 1 | u8 种类（0 bool，1 int，2 float）、持久 id、u64 值 |
 | `CutsceneStart` = 15 | 1 | u32 房间 hash、`场景:层级路径`、f64 播放时间 |
+| `SharedInventory` = 16 | 1 | 持久 key、物品数；每件物品含类型、定义 GUID、可序列化值字段 |
 | `Checkpoint*` = 20…33 | 1 | 共同存档会话、请求、准备、就绪、执行、结果确认、完成、取消及死亡通知；携带会话与操作标识，按消息附加 checkpoint 标识和槽位 |
 
 hash 都用 UTF-8 FNV-1a（`Packets.Hash`），保证两台机器算出来一致。新的可靠消息用
@@ -147,11 +154,11 @@ hash 都用 UTF-8 FNV-1a（`Packets.Hash`），保证两台机器算出来一致
   另一边只驱动“怪物傀儡”，并让 AI 能把远端玩家当目标，这是下一步。
 - 世界同步只传“之后的变化”，加入时不会把房主的整个世界拷过来。首次发现或被替换的存档数据对象会成为新基线，相关变化可能遗漏。两边从同一个存档开始最一致（双开测试就是这样）。
 - 双方同时伤害同一怪物时，收到远端伤害可能覆盖本地尚未发送的伤害基线，伤害叠加和双方血量一致性不能保证。
-- 运行时生成的东西（掉落物、刷出来的怪）两边 GUID 不同，不同步。背包、地图、血量各人是各人的。
+- 运行时生成的东西（掉落物、刷出来的怪）两边 GUID 不同，不同步。个人背包、地图、血量各人是各人的；同一储物箱请避免同时整理。
 - 对方的手电光束（3D Light）不会显示，只显示精灵。
 - 暂停与过场同步需要继续覆盖具体场景测试，不保证所有过场都完整同步。
 - 不同游戏/协议版本目前只记录警告，不会阻止加入大厅；共同存读档会检查游戏、Mod 和协议版本，一致后才可使用。
-- 0.4.0 的共同存档、死亡自动回档和断线恢复尚未经过真实双人 Steam 联机验证。共同保存不会复制房主的历史世界；写盘之后失败也无法自动恢复被覆盖的槽位。
+- 0.4.0 的共同存档、死亡自动回档和断线恢复，以及 0.5.0 的储物箱同步与角色状态提示，尚未经过真实双人 Steam 联机验证。共同保存不会复制房主的历史世界；写盘之后失败也无法自动恢复被覆盖的槽位。
 - 该安装包面向 Windows x64；SteamOS/Proton 和原生 Linux 尚未验证，不能沿用奶蛙资源包的 Steam Deck 兼容结论。
 
 ## 文件

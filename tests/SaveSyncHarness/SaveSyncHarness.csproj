@@ -9,5 +9,6 @@
   <ItemGroup>
     <Compile Include="../../src/Sync/SaveSync.cs" Link="Production/SaveSync.cs" />
     <Compile Include="../../src/Net/Packets.cs" Link="Production/Packets.cs" />
+    <Compile Include="../../src/Sync/InventorySnapshot.cs" Link="Production/InventorySnapshot.cs" />
   </ItemGroup>
 </Project>

@@ -89,6 +89,7 @@ namespace SilverPinesCoop.Net
         private CutsceneSync _cutscenes;
         private GUIStyle _statusStyle;
         private GUIStyle _noticeStyle;
+        private GUIStyle _activityStyle;
         private int _styleHeight;
         private bool _quitting;
         private LocalLink _link;            // two-copy test over 127.0.0.1 instead of a Steam lobby (--coop-local)
@@ -307,6 +308,7 @@ namespace SilverPinesCoop.Net
             _cutscenes = new CutsceneSync(this);
             RegisterHandler(PacketType.PauseState, _pause.OnState);
             RegisterHandler(PacketType.WorldEntry, OnWorldEntry);
+            RegisterHandler(PacketType.SharedInventory, OnSharedInventory);
             RegisterHandler(PacketType.StoryFlag, OnStoryFlag);
             RegisterHandler(PacketType.CutsceneStart, OnCutsceneStart);
             RegisterHandler(PacketType.CheckpointSession, _save.OnSession);
@@ -349,6 +351,25 @@ namespace SilverPinesCoop.Net
                 var h = _noticeStyle.fontSize * 3f;
                 GUI.Box(new Rect((Screen.width - w) / 2f, Screen.height * 0.4f, w, h), notice, _noticeStyle);
             }
+            var camera = Camera.main;
+            if (camera != null && _pause != null)
+                foreach (var pair in _puppets)
+                {
+                    var activity = _pause.Activity(pair.Key);
+                    if (string.IsNullOrEmpty(activity) || !pair.Value.TryGetWorldPosition(out var position))
+                        continue;
+                    var screen = camera.WorldToScreenPoint(position + Vector3.up * 1.35f);
+                    if (screen.z <= 0f)
+                        continue;
+                    const float width = 220f;
+                    var height = _activityStyle.fontSize * 1.6f;
+                    var activityArea = new Rect(screen.x - width / 2f, Screen.height - screen.y - height / 2f, width, height);
+                    var activityColor = GUI.color;
+                    GUI.color = Color.black;
+                    GUI.Label(new Rect(activityArea.x + 1f, activityArea.y + 1f, activityArea.width, activityArea.height), activity, _activityStyle);
+                    GUI.color = activityColor;
+                    GUI.Label(activityArea, activity, _activityStyle);
+                }
             if (!Plugin.Cfg.ShowStatus.Value || string.IsNullOrEmpty(_status))
                 return;
             var area = new Rect(12f, 8f, Screen.width * 0.5f, _statusStyle.fontSize * 10f);
@@ -368,6 +389,11 @@ namespace SilverPinesCoop.Net
             _styleHeight = Screen.height;
             _statusStyle = new GUIStyle(GUI.skin.label) { fontSize = Math.Max(14, Screen.height / 60), wordWrap = false };
             _noticeStyle = new GUIStyle(GUI.skin.box) { fontSize = Math.Max(18, Screen.height / 32), alignment = TextAnchor.MiddleCenter };
+            _activityStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = Math.Max(16, Screen.height / 48), alignment = TextAnchor.MiddleCenter, wordWrap = false,
+                normal = { textColor = Color.white },
+            };
         }
 
         private void OnApplicationQuit()
@@ -956,6 +982,13 @@ namespace SilverPinesCoop.Net
         {
             if (!_save.SuppressWorldSync)
                 _world.OnEntry(peer, r, _roomHash);
+        }
+
+        [HideFromIl2Cpp]
+        private void OnSharedInventory(ulong peer, BinaryReader r)
+        {
+            if (!_save.SuppressWorldSync)
+                _world.OnInventory(peer, r, _roomHash);
         }
 
         [HideFromIl2Cpp]

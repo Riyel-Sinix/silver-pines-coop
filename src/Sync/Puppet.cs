@@ -20,6 +20,12 @@ namespace SilverPinesCoop.Sync
         public uint RoomHash { get; private set; }
         public bool HasSnapshot => _count > 0;
 
+        public bool TryGetWorldPosition(out Vector3 position)
+        {
+            position = _root != null ? _root.transform.position : Vector3.zero;
+            return _root != null && _root.activeSelf;
+        }
+
         private readonly GameObject _root;
         private readonly Dictionary<uint, SpriteRenderer> _parts = new();
         private readonly HashSet<uint> _drawn = new();

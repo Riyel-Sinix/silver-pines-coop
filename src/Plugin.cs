@@ -17,7 +17,7 @@ namespace SilverPinesCoop
     {
         public const string Guid = "com.riyelsinix.silverpines.coop";
         public const string DisplayName = "Silver Pines Coop";
-        public const string Version = "0.4.0";
+        public const string Version = "0.5.0";
 
         internal static ManualLogSource L;
         internal static CoopConfig Cfg;
@@ -95,7 +95,7 @@ namespace SilverPinesCoop
             SyncEnemies = cfg.Bind("World", "SyncEnemies", true,
                                    "Share damage to enemies in the same room, so a kill on one side is a kill on both.");
             SyncPause = cfg.Bind("World", "SyncPause", true,
-                                 "Hold the game while another player has the pause menu open or watches a cutscene.");
+                                 "Show when another player has the pause menu open or watches a cutscene.");
             SyncCutscenes = cfg.Bind("World", "SyncCutscenes", true,
                                      "Start a cutscene for players in the same room when one player triggers it.");
             SaveCheckpointKey = cfg.Bind("Keys", "SaveCheckpoint", KeyCode.F9,

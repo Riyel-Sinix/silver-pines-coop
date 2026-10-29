@@ -1,5 +1,6 @@
 using SilverPinesCoop.Game;
 using SilverPinesCoop.Net;
+using SilverPinesCoop.Sync;
 
 var tests = new (string Name, Action Run)[]
 {
@@ -32,6 +33,9 @@ var tests = new (string Name, Action Run)[]
     ("executing save resolves death requests after success or into explicit failure", SaveExecutingDeath),
     ("session sequence restarts for a new epoch after reconnect", SequenceRestartsWithEpoch),
     ("death during first save preparation cancels and keeps original load", FirstSavePrepareDeath),
+    ("shared inventory packet preserves item records", InventoryPacketRoundtrip),
+    ("shared inventory packet rejects truncated fields", InventoryPacketRejectsTruncatedFields),
+    ("shared inventory packet rejects invalid nested records", InventoryPacketRejectsInvalidRecord),
 };
 var failures = 0;
 foreach (var test in tests)
@@ -563,4 +567,77 @@ static void SequenceRestartsWithEpoch()
     world.Replay(newAnnouncement with { Body = body.ToArray() });
     Check.That(world.Guest.State<bool>("_ready"), "sequence one from the new epoch is accepted");
     Check.That(world.Host.State<bool>("_ready"), "new epoch handshake completes on the host");
+}
+
+static void InventoryPacketRoundtrip()
+{
+    var records = new List<InventoryItemRecord>
+    {
+        new()
+        {
+            Image = "CarpenterScripts.dll", Namespace = "", Type = "MeleeWeaponItemInstance",
+            Guid = "weapon-guid", AmmoGuid = "", Fields = new byte[] { 1, 2, 3, 4, 5 },
+        },
+        new()
+        {
+            Image = "CarpenterScripts.dll", Namespace = "", Type = "ProjectileWeaponItemInstance",
+            Guid = "gun-guid", AmmoGuid = "ammo-guid", Fields = new byte[] { 9, 0, 8, 0 },
+            Children = new List<InventoryItemRecord>
+            {
+                new()
+                {
+                    Image = "CarpenterScripts.dll", Namespace = "", Type = "KeyRingItemInstance",
+                    Guid = "keyring-guid", Fields = new byte[] { 6, 7 },
+                    Children = new List<InventoryItemRecord>
+                    {
+                        new()
+                        {
+                            Image = "CarpenterScripts.dll", Namespace = "", Type = "KeyItemInstance",
+                            Guid = "key-guid", Fields = new byte[] { 3 },
+                        },
+                    },
+                },
+            },
+        },
+    };
+    var payload = InventorySnapshotCodec.Encode("storage-key", records);
+    using var reader = new BinaryReader(new MemoryStream(payload));
+    Check.That(InventorySnapshotCodec.TryDecode(reader, out var key, out var decoded), "valid storage payload decodes");
+    Check.Equal("storage-key", key, "inventory persistent key round-trips");
+    Check.Equal(2, decoded.Count, "inventory item count round-trips");
+    Check.Equal(records[1].Type, decoded[1].Type, "runtime item type round-trips");
+    Check.Equal(records[1].Guid, decoded[1].Guid, "item definition GUID round-trips");
+    Check.Equal(records[1].AmmoGuid, decoded[1].AmmoGuid, "loaded ammunition GUID round-trips");
+    Check.That(records[1].Fields.SequenceEqual(decoded[1].Fields), "item value fields round-trip");
+    Check.Equal(1, decoded[1].Children.Count, "attached upgrade round-trips");
+    Check.Equal("keyring-guid", decoded[1].Children[0].Guid, "nested item definition round-trips");
+    Check.Equal("key-guid", decoded[1].Children[0].Children[0].Guid, "contained key round-trips");
+    Check.Equal(payload.Length, (int)reader.BaseStream.Position, "codec consumes the complete message body");
+}
+
+static void InventoryPacketRejectsTruncatedFields()
+{
+    var payload = new byte[] { 0, 1, 0, 0, 0, 0 };
+    using var reader = new BinaryReader(new MemoryStream(payload));
+    Check.That(!InventorySnapshotCodec.TryDecode(reader, out _, out _), "truncated inventory fields are rejected");
+}
+
+static void InventoryPacketRejectsInvalidRecord()
+{
+    using var stream = new MemoryStream();
+    using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, true))
+    {
+        writer.Write("storage-key");
+        writer.Write((ushort)1);
+        writer.Write("CarpenterScripts.dll");
+        writer.Write("");
+        writer.Write("ItemInstance");
+        writer.Write("");
+        writer.Write("");
+        writer.Write((ushort)0);
+        writer.Write((ushort)0);
+    }
+    stream.Position = 0;
+    using var reader = new BinaryReader(stream);
+    Check.That(!InventorySnapshotCodec.TryDecode(reader, out _, out _), "invalid records are rejected without throwing");
 }

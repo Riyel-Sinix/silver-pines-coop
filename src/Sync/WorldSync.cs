@@ -4,6 +4,8 @@ using System.IO;
 using Il2CppInterop.Runtime;
 using SilverPinesCoop.Game;
 using SilverPinesCoop.Net;
+using UnityEngine.AddressableAssets;
+using UnityEngine.ResourceManagement.AsyncOperations;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -39,6 +41,22 @@ namespace SilverPinesCoop.Sync
             public IntPtr Data;
             public Il2CppRaw.Layout Layout;   // null: not synced
             public ulong Hash;
+            public bool Inventory;
+        }
+
+        private sealed class PendingInventory
+        {
+            public string Key;
+            public uint Room;
+            public bool Relay;
+            public List<InventoryItemRecord> Items;
+            public List<InventoryItemRecord> FlatItems;
+            public List<AssetReferenceT<ItemDefinition>> References;
+            public List<AsyncOperationHandle<ItemDefinition>> Handles;
+            public List<bool> OwnsHandle;
+            public List<AssetReferenceT<ItemDefinition>> AmmoReferences;
+            public List<AsyncOperationHandle<ItemDefinition>> AmmoHandles;
+            public List<bool> OwnsAmmoHandle;
         }
 
         private sealed class Variable
@@ -54,6 +72,8 @@ namespace SilverPinesCoop.Sync
         private readonly SteamNetManager _net;
         private readonly Dictionary<IntPtr, Entry> _entries = new();
         private readonly Dictionary<string, IntPtr> _entryByKey = new();
+        private readonly Dictionary<string, PendingInventory> _pendingInventories = new();
+        private readonly Dictionary<string, (AssetReferenceT<ItemDefinition> Reference, AsyncOperationHandle<ItemDefinition> Handle)> _loadedDefinitions = new();
         private readonly Dictionary<IntPtr, Variable> _variables = new();
         private readonly Dictionary<string, Variable> _variableById = new();
         private readonly List<(string Guid, PersistentDataIdentifier Identifier)> _identifiers = new();
@@ -77,6 +97,7 @@ namespace SilverPinesCoop.Sync
 
         public void Poll(float now, bool connected)
         {
+            PollPendingInventories();
             if (now < _nextPoll)
                 return;
             _nextPoll = now + PollInterval;
@@ -97,6 +118,9 @@ namespace SilverPinesCoop.Sync
         /// <summary>Another save was loaded (or a new game started): everything is baseline again.</summary>
         private void Reset(IntPtr data)
         {
+            foreach (var pending in _pendingInventories.Values)
+                ReleasePending(pending);
+            _pendingInventories.Clear();
             _data = data;
             _entries.Clear();
             _entryByKey.Clear();
@@ -141,8 +165,25 @@ namespace SilverPinesCoop.Sync
                 {
                     // first sight, or the owner created / replaced its data object: that is the baseline, not a change
                     entry.Data = dataObj;
-                    entry.Layout = Syncable(dataObj);
-                    entry.Hash = entry.Layout == null ? 0 : Il2CppRaw.Hash(dataObj, entry.Layout);
+                    entry.Inventory = IsSharedInventory(dataObj);
+                    entry.Layout = entry.Inventory ? null : Syncable(dataObj);
+                    entry.Hash = entry.Inventory ? InventoryHash(dataObj) :
+                        entry.Layout == null ? 0 : Il2CppRaw.Hash(dataObj, entry.Layout);
+                    if (entry.Inventory && connected && _net.IsHost && entry.Key != null)
+                        SendInventory(entry.Key, ReadInventory(dataObj));
+                    continue;
+                }
+                if (entry.Inventory)
+                {
+                    if (entry.Key == null || _pendingInventories.ContainsKey(entry.Key))
+                        continue;
+                    synced++;
+                    var inventoryHash = InventoryHash(dataObj);
+                    if (inventoryHash == entry.Hash)
+                        continue;
+                    entry.Hash = inventoryHash;
+                    if (connected)
+                        SendInventory(entry.Key, ReadInventory(dataObj));
                     continue;
                 }
                 if (entry.Layout == null || entry.Key == null)
@@ -170,6 +211,13 @@ namespace SilverPinesCoop.Sync
             return layout;
         }
 
+        private static bool IsSharedInventory(IntPtr dataObj)
+        {
+            if (dataObj == IntPtr.Zero)
+                return false;
+            return Il2CppRaw.Str(IL2CPP.il2cpp_class_get_name(Il2CppRaw.ClassOf(dataObj))) == "PersistentDataInventory";
+        }
+
         private void SendEntry(Entry entry)
         {
             var layout = entry.Layout;
@@ -185,6 +233,405 @@ namespace SilverPinesCoop.Sync
             });
             Sent++;
             Plugin.L.LogDebug($"World sync: sent {layout.Name} {entry.Key}");
+        }
+
+        private List<InventoryItemRecord> ReadInventory(IntPtr dataObj)
+        {
+            try
+            {
+                var records = new List<InventoryItemRecord>();
+                var inventory = new PersistentDataInventory(dataObj);
+                var items = inventory.m_items;
+                if (items == null || items.Count > InventorySnapshotCodec.MaxItems)
+                    return null;
+                var totalItems = 0;
+                for (var i = 0; i < items.Count; i++)
+                {
+                    var record = ReadInventoryItem(items[i], 0, ref totalItems);
+                    if (record == null)
+                        return null;
+                    records.Add(record);
+                }
+                return records;
+            }
+            catch (Exception e)
+            {
+                Plugin.L.LogWarning($"Shared storage snapshot skipped: {e.Message}");
+                return null;
+            }
+        }
+
+        private InventoryItemRecord ReadInventoryItem(ItemInstance item, int depth, ref int totalItems)
+        {
+            if (depth > InventorySnapshotCodec.MaxDepth || ++totalItems > InventorySnapshotCodec.MaxItems || item == null)
+                throw new InvalidDataException("Shared storage contains too many nested items");
+            var reference = item.m_itemDefinitionAssetReference;
+            var guid = reference?.AssetGUID;
+            var layout = Il2CppRaw.LayoutOf(Il2CppRaw.ClassOf(item.Pointer));
+            if (string.IsNullOrEmpty(guid) || layout == null || layout.Fields.Length == 0)
+            {
+                Plugin.L.LogWarning("Shared storage contains an item without a serializable definition; snapshot skipped");
+                return null;
+            }
+            var fields = Il2CppRaw.Read(item.Pointer, layout);
+            if (fields.Length > InventorySnapshotCodec.MaxFieldBytes)
+                throw new InvalidDataException("Shared storage item state exceeds the snapshot limit");
+            var record = new InventoryItemRecord
+            {
+                Image = layout.Image ?? "", Namespace = layout.Namespace ?? "", Type = layout.Name,
+                Guid = guid, Fields = fields,
+            };
+            if (item.TryCast<ProjectileWeaponItemInstance>() is { } projectile)
+                record.AmmoGuid = projectile.m_loadedAmmoTypeAssetGUID ?? "";
+
+            var nestedList = item.TryCast<ProjectileWeaponItemInstance>() is { } weapon
+                ? weapon.m_attachedUpgrades?.Pointer ?? IntPtr.Zero
+                : item.TryCast<KeyRingItemInstance>() is { } keyRing
+                    ? keyRing.m_containedItems?.Pointer ?? IntPtr.Zero
+                    : IntPtr.Zero;
+            if (nestedList != IntPtr.Zero)
+            {
+                if (!Il2CppRaw.ListItems(nestedList, out var nestedItems, out var nestedCount) ||
+                    nestedCount > InventorySnapshotCodec.MaxItems)
+                    throw new InvalidDataException("Shared storage contains an invalid nested item list");
+                for (var i = 0; i < nestedCount; i++)
+                {
+                    var child = new ItemInstance(Il2CppRaw.ArrayElement(nestedItems, i));
+                    var childRecord = ReadInventoryItem(child, depth + 1, ref totalItems);
+                    if (childRecord == null)
+                        return null;
+                    record.Children.Add(childRecord);
+                }
+            }
+            return record;
+        }
+
+        private ulong InventoryHash(IntPtr dataObj)
+        {
+            var records = ReadInventory(dataObj);
+            if (records == null)
+                return 0;
+            byte[] payload;
+            try { payload = InventorySnapshotCodec.Encode("", records); }
+            catch (InvalidDataException e)
+            {
+                Plugin.L.LogWarning($"Shared storage snapshot skipped: {e.Message}");
+                return 0;
+            }
+            var hash = 14695981039346656037ul;
+            foreach (var value in payload)
+            {
+                hash ^= value;
+                hash *= 1099511628211ul;
+            }
+            return hash;
+        }
+
+        private void SendInventory(string key, List<InventoryItemRecord> records)
+        {
+            if (records == null || _net.LocalTestMode || !_net.CheckpointPeerCompatible)
+                return;
+            byte[] payload;
+            try { payload = InventorySnapshotCodec.Encode(key, records); }
+            catch (InvalidDataException e)
+            {
+                Plugin.L.LogWarning($"Shared storage snapshot for {key}: {e.Message}");
+                return;
+            }
+            if (payload.Length + 1 > Packets.MaxMessageSize)
+            {
+                Plugin.L.LogWarning($"Shared storage snapshot for {key} exceeds the network message limit");
+                return;
+            }
+            if (_net.IsHost)
+                _net.BroadcastReliable(PacketType.SharedInventory, w => w.Write(payload));
+            else
+                _net.SendReliable(_net.HostId, PacketType.SharedInventory, w => w.Write(payload));
+            Sent++;
+        }
+
+        public void OnInventory(ulong sender, BinaryReader reader, uint localRoom)
+        {
+            if (_net.LocalTestMode || !_net.CheckpointPeerCompatible ||
+                _data == IntPtr.Zero || _entryDataOffset < 0)
+                return;
+            if (_net.IsHost ? sender != _net.PartnerId : sender != _net.HostId)
+                return;
+            if (!InventorySnapshotCodec.TryDecode(reader, out var key, out var records))
+                return;
+            var flatItems = new List<InventoryItemRecord>();
+            foreach (var record in records)
+                FlattenItems(record, flatItems);
+            if (!_entryByKey.TryGetValue(key, out var entryPtr))
+            {
+                var created = GameAccess.DataStore?.Data?.GetDataEntry(key, true);
+                if (created == null)
+                    return;
+                entryPtr = created.Pointer;
+                _entryByKey[key] = entryPtr;
+            }
+            var dataObj = Il2CppRaw.ReadPointer(entryPtr, _entryDataOffset);
+            if (dataObj != IntPtr.Zero && !IsSharedInventory(dataObj))
+                return;
+
+            if (_pendingInventories.TryGetValue(key, out var previous))
+                ReleasePending(previous);
+            var pending = new PendingInventory
+            {
+                Key = key, Room = localRoom, Relay = _net.IsHost,
+                Items = records,
+                FlatItems = flatItems,
+                References = new List<AssetReferenceT<ItemDefinition>>(flatItems.Count),
+                Handles = new List<AsyncOperationHandle<ItemDefinition>>(flatItems.Count),
+                OwnsHandle = new List<bool>(flatItems.Count),
+                AmmoReferences = new List<AssetReferenceT<ItemDefinition>>(flatItems.Count),
+                AmmoHandles = new List<AsyncOperationHandle<ItemDefinition>>(flatItems.Count),
+                OwnsAmmoHandle = new List<bool>(flatItems.Count),
+            };
+            var loading = new Dictionary<string, (AssetReferenceT<ItemDefinition>, AsyncOperationHandle<ItemDefinition>)>();
+            foreach (var item in flatItems)
+            {
+                if (_loadedDefinitions.TryGetValue(item.Guid, out var cached))
+                {
+                    pending.References.Add(cached.Reference);
+                    pending.Handles.Add(cached.Handle);
+                    pending.OwnsHandle.Add(false);
+                }
+                else if (loading.TryGetValue(item.Guid, out var existing))
+                {
+                    pending.References.Add(existing.Item1);
+                    pending.Handles.Add(existing.Item2);
+                    pending.OwnsHandle.Add(false);
+                }
+                else
+                {
+                    var reference = new AssetReferenceT<ItemDefinition>(item.Guid);
+                    var handle = reference.LoadAssetAsync();
+                    loading[item.Guid] = (reference, handle);
+                    pending.References.Add(reference);
+                    pending.Handles.Add(handle);
+                    pending.OwnsHandle.Add(true);
+                }
+
+                if (string.IsNullOrEmpty(item.AmmoGuid))
+                {
+                    pending.AmmoReferences.Add(null);
+                    pending.AmmoHandles.Add(default);
+                    pending.OwnsAmmoHandle.Add(false);
+                }
+                else if (_loadedDefinitions.TryGetValue(item.AmmoGuid, out var cachedAmmo))
+                {
+                    pending.AmmoReferences.Add(cachedAmmo.Reference);
+                    pending.AmmoHandles.Add(cachedAmmo.Handle);
+                    pending.OwnsAmmoHandle.Add(false);
+                }
+                else if (loading.TryGetValue(item.AmmoGuid, out var existingAmmo))
+                {
+                    pending.AmmoReferences.Add(existingAmmo.Item1);
+                    pending.AmmoHandles.Add(existingAmmo.Item2);
+                    pending.OwnsAmmoHandle.Add(false);
+                }
+                else
+                {
+                    var ammoReference = new AssetReferenceT<ItemDefinition>(item.AmmoGuid);
+                    var ammoHandle = ammoReference.LoadAssetAsync();
+                    loading[item.AmmoGuid] = (ammoReference, ammoHandle);
+                    pending.AmmoReferences.Add(ammoReference);
+                    pending.AmmoHandles.Add(ammoHandle);
+                    pending.OwnsAmmoHandle.Add(true);
+                }
+            }
+            _pendingInventories[key] = pending;
+            if (flatItems.Count == 0)
+                ApplyInventory(pending);
+        }
+
+        private static void FlattenItems(InventoryItemRecord item, List<InventoryItemRecord> flattened)
+        {
+            flattened.Add(item);
+            foreach (var child in item.Children)
+                FlattenItems(child, flattened);
+        }
+
+        private void PollPendingInventories()
+        {
+            if (_pendingInventories.Count == 0)
+                return;
+            var keys = new List<string>(_pendingInventories.Keys);
+            foreach (var key in keys)
+            {
+                if (!_pendingInventories.TryGetValue(key, out var pending))
+                    continue;
+                var ready = true;
+                for (var i = 0; i < pending.FlatItems.Count; i++)
+                {
+                    var handle = pending.Handles[i];
+                    if (!handle.IsDone)
+                    {
+                        ready = false;
+                        break;
+                    }
+                    if (handle.Status != AsyncOperationStatus.Succeeded || handle.Result == null)
+                    {
+                        Plugin.L.LogWarning($"Shared storage item definition {pending.FlatItems[i].Guid} failed to load");
+                        ready = false;
+                        ReleasePending(pending);
+                        _pendingInventories.Remove(key);
+                        break;
+                    }
+                    if (!string.IsNullOrEmpty(pending.FlatItems[i].AmmoGuid))
+                    {
+                        var ammo = pending.AmmoHandles[i];
+                        if (!ammo.IsDone)
+                        {
+                            ready = false;
+                            break;
+                        }
+                        if (ammo.Status != AsyncOperationStatus.Succeeded || ammo.Result == null)
+                        {
+                            Plugin.L.LogWarning($"Shared storage ammunition {pending.FlatItems[i].AmmoGuid} failed to load");
+                            ready = false;
+                            ReleasePending(pending);
+                            _pendingInventories.Remove(key);
+                            break;
+                        }
+                    }
+                }
+                if (ready)
+                    ApplyInventory(pending);
+            }
+        }
+
+        private void ApplyInventory(PendingInventory pending)
+        {
+            try
+            {
+                var entryPtr = _entryByKey.TryGetValue(pending.Key, out var known) ? known : IntPtr.Zero;
+                if (entryPtr == IntPtr.Zero)
+                    return;
+                var dataObj = Il2CppRaw.ReadPointer(entryPtr, _entryDataOffset);
+                var inventoryClass = IL2CPP.GetIl2CppClass("CarpenterScripts.dll", "", "PersistentDataInventory");
+                if (inventoryClass == IntPtr.Zero)
+                    throw new InvalidOperationException("PersistentDataInventory type is unavailable");
+                if (dataObj == IntPtr.Zero)
+                {
+                    dataObj = Il2CppRaw.New(inventoryClass);
+                    if (dataObj == IntPtr.Zero)
+                        throw new InvalidOperationException("Could not create shared inventory data");
+                    new PersistentDataObject(entryPtr).Data = new Il2CppSystem.Object(dataObj);
+                }
+
+                var items = new Il2CppSystem.Collections.Generic.List<ItemInstance>();
+                var itemIndex = 0;
+                foreach (var record in pending.Items)
+                    items.Add(CreateInventoryItem(record, pending, ref itemIndex));
+                if (itemIndex != pending.FlatItems.Count)
+                    throw new InvalidOperationException("Shared inventory item tree is inconsistent");
+
+                var inventory = new PersistentDataInventory(dataObj) { m_items = items };
+                var entry = new PersistentDataObject(entryPtr);
+                entry.Data = new Il2CppSystem.Object(inventory.Pointer);
+                for (var i = 0; i < pending.FlatItems.Count; i++)
+                {
+                    if (pending.OwnsHandle[i])
+                    {
+                        _loadedDefinitions[pending.FlatItems[i].Guid] = (pending.References[i], pending.Handles[i]);
+                        pending.OwnsHandle[i] = false;
+                    }
+                    if (pending.OwnsAmmoHandle[i])
+                    {
+                        _loadedDefinitions[pending.FlatItems[i].AmmoGuid] = (pending.AmmoReferences[i], pending.AmmoHandles[i]);
+                        pending.OwnsAmmoHandle[i] = false;
+                    }
+                }
+                var state = _entries.TryGetValue(entryPtr, out var existing)
+                    ? existing
+                    : _entries[entryPtr] = new Entry { KeyPtr = Il2CppRaw.ReadPointer(entryPtr, _entryKeyOffset), Key = pending.Key };
+                state.Data = inventory.Pointer;
+                state.Inventory = true;
+                state.Layout = null;
+                state.Hash = InventoryHash(state.Data);
+                Applied++;
+                Reapply(pending.Key, pending.Room);
+                if (pending.Relay)
+                    _net.BroadcastReliable(PacketType.SharedInventory, w => w.Write(InventorySnapshotCodec.Encode(pending.Key, pending.Items)));
+            }
+            catch (Exception e)
+            {
+                Plugin.L.LogWarning($"Shared storage {pending.Key}: {e.Message}");
+            }
+            finally
+            {
+                ReleasePending(pending);
+                _pendingInventories.Remove(pending.Key);
+            }
+        }
+
+        private static ItemInstance CreateInventoryItem(InventoryItemRecord record, PendingInventory pending, ref int itemIndex)
+        {
+            var index = itemIndex++;
+            if (index >= pending.FlatItems.Count)
+                throw new InvalidOperationException("Shared inventory item tree is inconsistent");
+            var klass = Il2CppRaw.FindClass(record.Image, record.Namespace, record.Type);
+            if (!IsItemInstanceClass(klass))
+                throw new InvalidOperationException($"Unsupported shared item type {record.Type}");
+            var layout = Il2CppRaw.LayoutOf(klass);
+            var pointer = layout == null ? IntPtr.Zero : Il2CppRaw.New(klass);
+            if (pointer == IntPtr.Zero)
+                throw new InvalidOperationException($"Shared item layout mismatch: {record.Type}");
+            var item = new ItemInstance(pointer)
+            {
+                m_itemDefinition = pending.Handles[index].Result,
+                m_itemDefinitionAssetReference = pending.References[index],
+            };
+            if (!Il2CppRaw.Write(pointer, layout, record.Fields))
+                throw new InvalidOperationException($"Shared item layout mismatch: {record.Type}");
+            if (!string.IsNullOrEmpty(record.AmmoGuid) && record.Type == "ProjectileWeaponItemInstance")
+            {
+                var projectile = new ProjectileWeaponItemInstance(pointer)
+                {
+                    m_loadedAmmoTypeAssetGUID = record.AmmoGuid,
+                    m_loadedAmmoType = pending.AmmoHandles[index].Result.TryCast<AmmunitionItemDefinition>(),
+                };
+            }
+            if (record.Type == "ProjectileWeaponItemInstance")
+            {
+                var upgrades = new Il2CppSystem.Collections.Generic.List<ItemInstance>();
+                foreach (var child in record.Children)
+                    upgrades.Add(CreateInventoryItem(child, pending, ref itemIndex));
+                new ProjectileWeaponItemInstance(pointer).m_attachedUpgrades = upgrades;
+            }
+            else if (record.Type == "KeyRingItemInstance")
+            {
+                var contained = new Il2CppSystem.Collections.Generic.List<ItemInstance>();
+                foreach (var child in record.Children)
+                    contained.Add(CreateInventoryItem(child, pending, ref itemIndex));
+                new KeyRingItemInstance(pointer).m_containedItems = contained;
+            }
+            else if (record.Children.Count > 0)
+            {
+                throw new InvalidOperationException($"Unsupported nested shared item type {record.Type}");
+            }
+            return item;
+        }
+
+        private static bool IsItemInstanceClass(IntPtr klass)
+        {
+            var itemClass = IL2CPP.GetIl2CppClass("CarpenterScripts.dll", "", "ItemInstance");
+            for (var current = klass; current != IntPtr.Zero; current = IL2CPP.il2cpp_class_get_parent(current))
+                if (current == itemClass)
+                    return true;
+            return false;
+        }
+
+        private static void ReleasePending(PendingInventory pending)
+        {
+            for (var i = 0; i < pending.Handles.Count; i++)
+                if (pending.OwnsHandle[i] && pending.Handles[i].IsValid())
+                    pending.Handles[i].Release();
+            for (var i = 0; i < pending.AmmoHandles.Count; i++)
+                if (pending.OwnsAmmoHandle[i] && pending.AmmoHandles[i].IsValid())
+                    pending.AmmoHandles[i].Release();
         }
 
         public void OnEntry(ulong sender, BinaryReader r, uint localRoom)

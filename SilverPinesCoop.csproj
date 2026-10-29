@@ -31,6 +31,8 @@
     <Reference Include="$(InteropDir)\UnityEngine.DirectorModule.dll" Private="false" />
     <Reference Include="$(InteropDir)\UnityEngine.TextRenderingModule.dll" Private="false" />
     <Reference Include="$(InteropDir)\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\Unity.Addressables.dll" Private="false" />
+    <Reference Include="$(InteropDir)\Unity.ResourceManager.dll" Private="false" />
     <Reference Include="$(InteropDir)\CarpenterScripts.dll" Private="false" />
   </ItemGroup>
 </Project>
