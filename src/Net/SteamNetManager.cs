@@ -87,6 +87,11 @@ namespace SilverPinesCoop.Net
         private SaveSync _save;
         private bool _worldSuspended;
         private CutsceneSync _cutscenes;
+        private FollowSync _follow;
+        private bool _roomStory;            // the current room was reached through a story transition
+        private string _notice;
+        private float _noticeUntil;
+        private readonly HashSet<ulong> _snapshotDue = new();
         private GUIStyle _statusStyle;
         private GUIStyle _noticeStyle;
         private GUIStyle _activityStyle;
@@ -176,6 +181,48 @@ namespace SilverPinesCoop.Net
         [HideFromIl2Cpp]
         public string PeerName(ulong peer) => Name(peer);
 
+        [HideFromIl2Cpp]
+        public uint RoomHash => _roomHash;
+
+        [HideFromIl2Cpp]
+        public uint PeerRoomHash(ulong peer) => _peers.TryGetValue(peer, out var info) ? info.RoomHash : 0;
+
+        [HideFromIl2Cpp]
+        public string PeerRoomName(ulong peer) => _peers.TryGetValue(peer, out var info) ? info.RoomName : null;
+
+        [HideFromIl2Cpp]
+        public string PeerLevelGuid(ulong peer) => _peers.TryGetValue(peer, out var info) ? info.LevelGuid : null;
+
+        /// <summary>The other player's newest reported character position and the room it was in.</summary>
+        [HideFromIl2Cpp]
+        public bool TryGetPeerPosition(ulong peer, out Vector3 position, out uint room)
+        {
+            position = Vector3.zero;
+            room = 0;
+            return _puppets.TryGetValue(peer, out var puppet) && puppet.TryGetLatestPosition(out position, out room);
+        }
+
+        [HideFromIl2Cpp]
+        public bool SaveBusy => _save != null && _save.Busy;
+
+        /// <summary>A message in the middle of the screen for a few seconds.</summary>
+        [HideFromIl2Cpp]
+        public void ShowNotice(string text, float seconds = 4f)
+        {
+            _notice = text;
+            _noticeUntil = Time.realtimeSinceStartup + seconds;
+        }
+
+        /// <summary>The first other player (co-op is two players by default).</summary>
+        [HideFromIl2Cpp]
+        private ulong FirstPeer()
+        {
+            foreach (var member in _members)
+                if (member != _self)
+                    return member;
+            return 0;
+        }
+
         /// <summary>Handle a reliable packet type (channel 1). One handler per type; registering again replaces it.</summary>
         [HideFromIl2Cpp]
         public void RegisterHandler(PacketType type, PacketHandler handler) => _handlers[type] = handler;
@@ -216,6 +263,8 @@ namespace SilverPinesCoop.Net
         {
             w.Write(_roomHash);
             w.Write(_roomName);
+            w.Write(FollowSync.CurrentLevelGuid());
+            w.Write((byte)(_roomStory ? 1 : 0));
         }
 
         /// <summary>Reserved: report damage we dealt to a monster (monsters still need a shared network id).</summary>
@@ -306,6 +355,7 @@ namespace SilverPinesCoop.Net
             _pause = new PauseSync(this);
             _save = new SaveSync(this, _pause);
             _cutscenes = new CutsceneSync(this);
+            _follow = new FollowSync(this);
             RegisterHandler(PacketType.PauseState, _pause.OnState);
             RegisterHandler(PacketType.WorldEntry, OnWorldEntry);
             RegisterHandler(PacketType.SharedInventory, OnSharedInventory);
@@ -350,6 +400,15 @@ namespace SilverPinesCoop.Net
                 var w = Screen.width * 0.6f;
                 var h = _noticeStyle.fontSize * 3f;
                 GUI.Box(new Rect((Screen.width - w) / 2f, Screen.height * 0.4f, w, h), notice, _noticeStyle);
+            }
+            var message = _follow?.Notice;
+            if (string.IsNullOrEmpty(message) && _notice != null && Time.realtimeSinceStartup < _noticeUntil)
+                message = _notice;
+            if (!string.IsNullOrEmpty(message))
+            {
+                var w = Screen.width * 0.6f;
+                var h = _noticeStyle.fontSize * 2.4f;
+                GUI.Box(new Rect((Screen.width - w) / 2f, Screen.height * 0.55f, w, h), message, _noticeStyle);
             }
             var camera = Camera.main;
             if (camera != null && _pause != null)
@@ -457,6 +516,8 @@ namespace SilverPinesCoop.Net
             }
             _worldSuspended = _save.SuppressWorldSync;
             _pause.Update(now, Connected);
+            _follow.Watch(now);
+            _follow.Update(now, _roomHash);
 
             _tickAccumulator += Time.unscaledDeltaTime;
             var interval = 1f / Mathf.Clamp(Plugin.Cfg.TickRate.Value, 1, 60);
@@ -496,6 +557,7 @@ namespace SilverPinesCoop.Net
             UpdateRoom();
             UpdateStatus();
             var connected = Connected && !_save.SuppressWorldSync;
+            QueueDueSnapshots();
             _world.Poll(now, connected);
             if (Plugin.Cfg.SyncEnemies.Value && !_save.SuppressWorldSync)
                 _enemySync.Poll(now, _roomHash, connected);
@@ -535,6 +597,30 @@ namespace SilverPinesCoop.Net
                         Send(peer, Packets.ChannelUnreliable, SteamNative.SendUnreliableNoNagle | SteamNative.SendAutoRestartBrokenSession);
         }
 
+        /// <summary>On join the host sends its world once the joining player is in a level (not the main menu).</summary>
+        [HideFromIl2Cpp]
+        private void QueueDueSnapshots()
+        {
+            if (_snapshotDue.Count == 0)
+                return;
+            if (!Plugin.Cfg.SyncWorldOnJoin.Value || !IsHost || _link != null)
+            {
+                _snapshotDue.Clear();
+                return;
+            }
+            if (string.IsNullOrEmpty(FollowSync.CurrentLevelGuid()))
+                return;
+            _scratch.Clear();
+            foreach (var peer in _snapshotDue)
+                if (!string.IsNullOrEmpty(PeerLevelGuid(peer)))
+                    _scratch.Add(peer);
+            foreach (var peer in _scratch)
+            {
+                _snapshotDue.Remove(peer);
+                _world.QueueSnapshot(peer);
+            }
+        }
+
         [HideFromIl2Cpp]
         private void UpdateRoom()
         {
@@ -543,8 +629,9 @@ namespace SilverPinesCoop.Net
                 return;
             _roomName = name;
             _roomHash = Packets.Hash(_roomName);
+            _roomStory = _follow.TakeStoryArrival(Time.realtimeSinceStartup);
             _sprites.Invalidate();
-            Plugin.L.LogInfo($"Room: {_roomName}");
+            Plugin.L.LogInfo($"Room: {_roomName}{(_roomStory ? " (story transition)" : "")}");
             if (_state == LobbyState.InLobby)
                 SendChangeRoom();
         }
@@ -574,6 +661,17 @@ namespace SilverPinesCoop.Net
             }
             if (input.GetKeyDown(Plugin.Cfg.SaveCheckpointKey.Value))
                 _save?.RequestSave();
+            if (input.GetKeyDown(Plugin.Cfg.TeleportKey.Value) && Connected)
+                _follow.Request(FirstPeer(), Time.realtimeSinceStartup);
+            if (input.GetKeyDown(Plugin.Cfg.PushWorldKey.Value) && Connected)
+            {
+                if (_save.SuppressWorldSync)
+                    ShowNotice("正在共同存读档，稍后再同步世界进度");
+                else
+                    foreach (var member in _members)
+                        if (member != _self)
+                            _world.QueueSnapshot(member);
+            }
         }
 
         // ------------------------------------------------------------------ Steam
@@ -774,6 +872,7 @@ namespace SilverPinesCoop.Net
             Plugin.L.LogInfo($"{_peers[peer].Name} joined");
             SendHello(peer);   // with Steam this also opens our side of the session
             _pause.SendTo(peer);
+            _snapshotDue.Add(peer);
         }
 
         [HideFromIl2Cpp]
@@ -782,6 +881,8 @@ namespace SilverPinesCoop.Net
             Plugin.L.LogInfo($"{Name(peer)} left");
             _members.Remove(peer);
             _peers.Remove(peer);
+            _snapshotDue.Remove(peer);
+            _follow.Cancel();
             _pause.Forget(peer);
             if (_link == null)
                 CloseSession(peer);
@@ -931,7 +1032,12 @@ namespace SilverPinesCoop.Net
             w.Write(Application.version);
             w.Write(_roomHash);
             w.Write(_roomName);
+            w.Write(FollowSync.CurrentLevelGuid());
         }
+
+        /// <summary>Fields appended in later protocol versions: absent when an older version sent the packet.</summary>
+        [HideFromIl2Cpp]
+        private static bool More(BinaryReader r) => r.BaseStream.Position < r.BaseStream.Length;
 
         [HideFromIl2Cpp]
         private void OnHello(ulong peer, BinaryReader r)
@@ -941,6 +1047,7 @@ namespace SilverPinesCoop.Net
             var game = r.ReadString();
             var roomHash = r.ReadUInt32();
             var roomName = r.ReadString();
+            var levelGuid = More(r) ? r.ReadString() : "";
             Plugin.L.LogInfo($"Hello from {Name(peer)}: protocol {protocol}, mod {mod}, game {game}, room {roomName}");
             if (protocol != Packets.ProtocolVersion || game != Application.version)
                 Plugin.L.LogWarning($"{Name(peer)} runs protocol {protocol} / game {game}; this side: {Packets.ProtocolVersion} / {Application.version}");
@@ -948,6 +1055,7 @@ namespace SilverPinesCoop.Net
             {
                 info.RoomName = roomName;
                 info.RoomHash = roomHash;
+                info.LevelGuid = levelGuid;
                 info.ProtocolVersion = protocol;
                 info.GameVersion = game;
                 info.ModVersion = mod;
@@ -959,12 +1067,18 @@ namespace SilverPinesCoop.Net
         {
             var hash = r.ReadUInt32();
             var name = r.ReadString();
+            var levelGuid = More(r) ? r.ReadString() : "";
+            var story = More(r) && r.ReadByte() != 0;
+            uint previous = 0;
             if (_peers.TryGetValue(peer, out var info))
             {
+                previous = info.RoomHash;
                 info.RoomHash = hash;
                 info.RoomName = name;
+                info.LevelGuid = levelGuid;
             }
-            Plugin.L.LogInfo($"{Name(peer)} -> room {name}");
+            Plugin.L.LogInfo($"{Name(peer)} -> room {name}{(story ? " (story transition)" : "")}");
+            _follow.OnPeerMoved(peer, previous, _roomHash, story, Time.realtimeSinceStartup);
             PeerChangedRoom?.Invoke(peer, hash, name);
         }
 
@@ -1093,7 +1207,7 @@ namespace SilverPinesCoop.Net
 
         /// <summary>"Assets/Scenes/Levels/Outskirts/Outskirts_Diner_Interior.unity" -> "Outskirts_Diner_Interior".</summary>
         [HideFromIl2Cpp]
-        private static string ShortRoom(string room)
+        internal static string ShortRoom(string room)
         {
             if (string.IsNullOrEmpty(room))
                 return "?";
@@ -1140,7 +1254,8 @@ namespace SilverPinesCoop.Net
                         break;
                 }
             if (Connected)
-                text += $"\n同步：世界 发{_world.Sent}/收{_world.Applied}　敌人 发{_enemySync.Sent}/收{_enemySync.Applied}（本房间 {_enemySync.Tracked}）";
+                text += $"\n[{Plugin.Cfg.TeleportKey.Value}] 传送到队友　[{Plugin.Cfg.PushWorldKey.Value}] 把我的世界进度发给队友" +
+                        $"\n同步：世界 发{_world.Sent}/收{_world.Applied}　敌人 发{_enemySync.Sent}/收{_enemySync.Applied}（本房间 {_enemySync.Tracked}）";
             if (_save != null && !string.IsNullOrEmpty(_save.Status))
                 text += "\n" + _save.Status;
             if (Plugin.Cfg.LoopbackTest.Value)
@@ -1153,6 +1268,7 @@ namespace SilverPinesCoop.Net
             public string Name;
             public string RoomName;
             public uint RoomHash;
+            public string LevelGuid;
             public ushort ProtocolVersion;
             public string GameVersion;
             public string ModVersion;

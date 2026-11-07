@@ -26,6 +26,15 @@ namespace SilverPinesCoop.Sync
             return _root != null && _root.activeSelf;
         }
 
+        /// <summary>Where the other player's character root was in the newest snapshot (no interpolation, no offsets).</summary>
+        public bool TryGetLatestPosition(out Vector3 position, out uint room)
+        {
+            var newest = _ring[_head];
+            position = newest.Position;
+            room = newest.RoomHash;
+            return _count > 0 && newest.HasPlayer;
+        }
+
         private readonly GameObject _root;
         private readonly Dictionary<uint, SpriteRenderer> _parts = new();
         private readonly HashSet<uint> _drawn = new();

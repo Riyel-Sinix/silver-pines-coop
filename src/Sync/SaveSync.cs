@@ -51,6 +51,7 @@ namespace SilverPinesCoop.Sync
 
         public string Status { get; private set; } = "";
         public bool SuppressWorldSync => _blocked || _op?.Kind == Kind.Load;
+        public bool Busy => _blocked || _op != null;
 
         public SaveSync(SteamNetManager net, PauseSync pause)
         {

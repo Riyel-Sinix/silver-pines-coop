@@ -10,7 +10,7 @@ namespace SilverPinesCoop.Net
     {
         Hello = 1,          // ch1: protocol, mod and game version of the sender
         PlayerState = 2,    // ch0: position, room and the rendered sprites of the player (TickRate per second)
-        ChangeRoom = 10,    // ch1: the sender is now in another room (level)
+        ChangeRoom = 10,    // ch1: the sender is now in another room (level), its level asset GUID, how it got there
         MonsterDamage = 11, // ch1: an enemy lost health on the sender's side (EnemySync)
         PauseState = 12,    // ch1: the sender's player is in the pause menu / a cutscene (PauseSync)
         WorldEntry = 13,    // ch1: a save entry (door, pickup, interactable, ...) changed (WorldSync)
@@ -35,7 +35,7 @@ namespace SilverPinesCoop.Net
 
     public static class Packets
     {
-        public const ushort ProtocolVersion = 4;
+        public const ushort ProtocolVersion = 5;
         public const int ChannelUnreliable = 0;
         public const int ChannelReliable = 1;
         public const int MaxMessageSize = 64 * 1024;

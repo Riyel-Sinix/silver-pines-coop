@@ -34,6 +34,14 @@ namespace SilverPinesCoop.Sync
             "CharacterRandomizedScale", "MigratableEnemy", "AIWanderStrategy", "AIBirdFlockController",
         };
 
+        /// <summary>Objects whose state means "this player took the item / money / loot": per player unless
+        /// SharedPickups, so both players can pick up their own copy (inventories are per player).</summary>
+        private static readonly HashSet<string> PickupState = new()
+        {
+            "ItemPickup", "InteractableLootContainerCommand", "InteractablePickupMoneyCommand", "ShootableLootContainer",
+            "LorePickup",
+        };
+
         private sealed class Entry
         {
             public IntPtr KeyPtr;             // the il2cpp string: a different one means a new entry at a reused address
@@ -84,6 +92,9 @@ namespace SilverPinesCoop.Sync
         private float _nextIdentifierRefresh;
         private uint _identifierRoom;
         private bool _loggedInventory;
+        private ulong _snapshotPeer;
+        private string _flagWordsSource;
+        private string[] _flagWords = Array.Empty<string>();
 
         public int Sent { get; private set; }
         public int Applied { get; private set; }
@@ -113,6 +124,55 @@ namespace SilverPinesCoop.Sync
                 ScanEntries(connected);
             if (Plugin.Cfg.SyncStoryFlags.Value)
                 ScanVariables(store, connected);
+            if (_snapshotPeer != 0 && connected)
+                SendSnapshot();
+        }
+
+        /// <summary>Send our whole world state to <paramref name="peer"/> on the next poll (after the baseline scan).</summary>
+        public void QueueSnapshot(ulong peer) => _snapshotPeer = peer;
+
+        private void SendSnapshot()
+        {
+            var peer = _snapshotPeer;
+            _snapshotPeer = 0;
+            var entries = 0;
+            var flags = 0;
+            if (Plugin.Cfg.SyncWorld.Value)
+                foreach (var pair in _entryByKey)
+                {
+                    if (!_entries.TryGetValue(pair.Value, out var entry) || entry.Layout == null ||
+                        entry.Key != pair.Key || entry.Data == IntPtr.Zero)
+                        continue;
+                    SendEntry(entry, peer);
+                    entries++;
+                }
+            if (Plugin.Cfg.SyncStoryFlags.Value)
+                foreach (var variable in _variableById.Values)
+                {
+                    if ((variable.Kind != 0 && !Plugin.Cfg.SyncStoryNumbers.Value) || PerPlayerFlag(variable.Id))
+                        continue;
+                    SendVariable(variable, peer, false);
+                    flags++;
+                }
+            Plugin.L.LogInfo($"World snapshot sent to {_net.PeerName(peer)}: {entries} save entries, {flags} story variables");
+            _net.ShowNotice($"已把世界进度发给 {_net.PeerName(peer)}（{entries} 项物体状态，{flags} 个剧情变量）");
+        }
+
+        /// <summary>Story variables that mark an item as taken stay per player while pickups are per player.</summary>
+        private bool PerPlayerFlag(string id)
+        {
+            if (Plugin.Cfg.SharedPickups.Value || string.IsNullOrEmpty(id))
+                return false;
+            var source = Plugin.Cfg.PerPlayerFlagWords.Value ?? "";
+            if (source != _flagWordsSource)
+            {
+                _flagWordsSource = source;
+                _flagWords = source.Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            }
+            foreach (var word in _flagWords)
+                if (id.Contains(word, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
         }
 
         /// <summary>Another save was loaded (or a new game started): everything is baseline again.</summary>
@@ -208,6 +268,8 @@ namespace SilverPinesCoop.Sync
             var layout = Il2CppRaw.LayoutOf(Il2CppRaw.ClassOf(dataObj));
             if (layout == null || layout.Fields.Length == 0 || CharacterState.Contains(layout.OuterName))
                 return null;
+            if (!Plugin.Cfg.SharedPickups.Value && PickupState.Contains(layout.OuterName))
+                return null;
             return layout;
         }
 
@@ -218,11 +280,11 @@ namespace SilverPinesCoop.Sync
             return Il2CppRaw.Str(IL2CPP.il2cpp_class_get_name(Il2CppRaw.ClassOf(dataObj))) == "PersistentDataInventory";
         }
 
-        private void SendEntry(Entry entry)
+        private void SendEntry(Entry entry, ulong peer = 0)
         {
             var layout = entry.Layout;
             var bytes = Il2CppRaw.Read(entry.Data, layout);
-            _net.BroadcastReliable(PacketType.WorldEntry, w =>
+            void Body(BinaryWriter w)
             {
                 w.Write(entry.Key);
                 w.Write(layout.Image ?? "");
@@ -230,7 +292,11 @@ namespace SilverPinesCoop.Sync
                 w.Write(layout.Name);
                 w.Write((ushort)bytes.Length);
                 w.Write(bytes);
-            });
+            }
+            if (peer == 0)
+                _net.BroadcastReliable(PacketType.WorldEntry, Body);
+            else
+                _net.SendReliable(peer, PacketType.WorldEntry, Body);
             Sent++;
             Plugin.L.LogDebug($"World sync: sent {layout.Name} {entry.Key}");
         }
@@ -645,6 +711,8 @@ namespace SilverPinesCoop.Sync
                 return;
             var klass = Il2CppRaw.FindClass(image, ns, name);
             var layout = klass == IntPtr.Zero ? null : Il2CppRaw.LayoutOf(klass);
+            if (layout != null && !Plugin.Cfg.SharedPickups.Value && PickupState.Contains(layout.OuterName))
+                return;   // the other side shares pickups, this side keeps them per player
             if (layout == null)
             {
                 if (_unknownClasses.Add(name))
@@ -673,6 +741,12 @@ namespace SilverPinesCoop.Sync
             {
                 Plugin.L.LogWarning($"World sync: {key} holds a different class here, ignored");
                 return;
+            }
+            else if (bytes.AsSpan().SequenceEqual(Il2CppRaw.Read(dataObj, layout)))
+            {
+                if (_entries.TryGetValue(entryPtr, out var same) && same.Layout != null)
+                    same.Hash = Il2CppRaw.Hash(dataObj, layout);
+                return;   // already in that state (a world snapshot repeats most entries): do not make objects reload
             }
             if (!Il2CppRaw.Write(dataObj, layout, bytes))
             {
@@ -788,7 +862,7 @@ namespace SilverPinesCoop.Sync
                 if (hash == variable.Hash)
                     continue;
                 variable.Hash = hash;
-                if (connected)
+                if (connected && !PerPlayerFlag(variable.Id))
                     SendVariable(variable);
             }
         }
@@ -826,17 +900,22 @@ namespace SilverPinesCoop.Sync
             return h;
         }
 
-        private void SendVariable(Variable variable)
+        private void SendVariable(Variable variable, ulong peer = 0, bool log = true)
         {
             var value = HashValue(variable);
-            _net.BroadcastReliable(PacketType.StoryFlag, w =>
+            void Body(BinaryWriter w)
             {
                 w.Write((byte)variable.Kind);
                 w.Write(variable.Id);
                 w.Write(value);
-            });
+            }
+            if (peer == 0)
+                _net.BroadcastReliable(PacketType.StoryFlag, Body);
+            else
+                _net.SendReliable(peer, PacketType.StoryFlag, Body);
             Sent++;
-            Plugin.L.LogInfo($"Story flag sent: {variable.Id} = {DescribeValue(variable.Kind, value)}");
+            if (log)
+                Plugin.L.LogInfo($"Story flag sent: {variable.Id} = {DescribeValue(variable.Kind, value)}");
         }
 
         public void OnVariable(ulong sender, BinaryReader r)
@@ -850,6 +929,13 @@ namespace SilverPinesCoop.Sync
             {
                 Plugin.L.LogDebug($"Story flag {id} not known here");
                 return;
+            }
+            if (PerPlayerFlag(id))
+                return;
+            if (HashValue(variable) == raw)
+            {
+                variable.Hash = raw;
+                return;   // already that value (a world snapshot repeats most of them)
             }
             variable.Hash = raw;   // set first: the setter's listeners must not make the poll echo it
             try

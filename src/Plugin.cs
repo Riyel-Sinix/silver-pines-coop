@@ -17,7 +17,7 @@ namespace SilverPinesCoop
     {
         public const string Guid = "com.riyelsinix.silverpines.coop";
         public const string DisplayName = "Silver Pines Coop";
-        public const string Version = "0.5.0";
+        public const string Version = "0.6.0";
 
         internal static ManualLogSource L;
         internal static CoopConfig Cfg;
@@ -56,6 +56,13 @@ namespace SilverPinesCoop
         public readonly ConfigEntry<bool> LoopbackTest;
         public readonly ConfigEntry<float> LoopbackOffsetX;
         public readonly ConfigEntry<bool> SyncWorld;
+        public readonly ConfigEntry<bool> SharedPickups;
+        public readonly ConfigEntry<string> PerPlayerFlagWords;
+        public readonly ConfigEntry<bool> SyncWorldOnJoin;
+        public readonly ConfigEntry<bool> FollowStoryTransitions;
+        public readonly ConfigEntry<float> FollowDelay;
+        public readonly ConfigEntry<KeyCode> TeleportKey;
+        public readonly ConfigEntry<KeyCode> PushWorldKey;
         public readonly ConfigEntry<bool> SyncStoryFlags;
         public readonly ConfigEntry<bool> SyncStoryNumbers;
         public readonly ConfigEntry<bool> SyncEnemies;
@@ -87,8 +94,20 @@ namespace SilverPinesCoop
                                     "Mirror your own player as a local puppet (no Steam), to test the puppet alone.");
             LoopbackOffsetX = cfg.Bind("Debug", "LoopbackOffsetX", 1.5f, "Loopback puppet offset in world units.");
             SyncWorld = cfg.Bind("World", "SyncWorld", true,
-                                 "Share world changes through the save data: doors, picked-up items (gone for everyone), " +
-                                 "interactables, triggers, puzzles.");
+                                 "Share world changes through the save data: doors, interactables, triggers, puzzles.");
+            SharedPickups = cfg.Bind("World", "SharedPickups", false,
+                                     "On: an item picked up / taken from a container by one player is gone for everyone. " +
+                                     "Off: every player picks up their own copy (inventories are per player).");
+            PerPlayerFlagWords = cfg.Bind("World", "PerPlayerFlagWords", "Taken,PickedUp,Pickup,Collected,Looted",
+                                          "With SharedPickups off, story yes/no variables whose id contains one of these " +
+                                          "words (comma separated, any case) stay per player: they usually mark an item as taken.");
+            SyncWorldOnJoin = cfg.Bind("World", "SyncWorldOnJoin", true,
+                                       "When a player joins, the host sends its whole world state (doors, puzzles, story " +
+                                       "variables) so both worlds start from the host's progress.");
+            FollowStoryTransitions = cfg.Bind("World", "FollowStoryTransitions", true,
+                                              "When the game's story moves the other player to another level while you are " +
+                                              "in the same room, follow them there automatically.");
+            FollowDelay = cfg.Bind("World", "FollowDelay", 3f, "Seconds before following a story transition (press the teleport key to go at once).");
             SyncStoryFlags = cfg.Bind("World", "SyncStoryFlags", true, "Share the game's persistent yes/no story variables.");
             SyncStoryNumbers = cfg.Bind("World", "SyncStoryNumbers", false,
                                         "Also share persistent number variables (off: some may be per-player counters).");
@@ -98,6 +117,10 @@ namespace SilverPinesCoop
                                  "Show when another player has the pause menu open or watches a cutscene.");
             SyncCutscenes = cfg.Bind("World", "SyncCutscenes", true,
                                      "Start a cutscene for players in the same room when one player triggers it.");
+            TeleportKey = cfg.Bind("Keys", "TeleportToPartner", KeyCode.F10,
+                                   "Go to the other player: their room (through the game's own level transition) and position.");
+            PushWorldKey = cfg.Bind("Keys", "PushWorld", KeyCode.F11,
+                                    "Send your whole world state (doors, puzzles, story variables) to the other player.");
             SaveCheckpointKey = cfg.Bind("Keys", "SaveCheckpoint", KeyCode.F9,
                                          "Save a shared co-op checkpoint to both players' local profiles.");
             LastCheckpointPeer = cfg.Bind("Save", "LastCheckpointPeer", "", "Managed by the mod: Steam partner of the committed checkpoint.");
