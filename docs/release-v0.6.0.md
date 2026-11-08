@@ -8,6 +8,6 @@ Silver Pines Coop **0.6.0** 根据通关玩家的反馈调整：道具改为各�
 
 **进度同步。** 两人都进入存档后，房主自动把自己的世界状态（门、谜题、剧情变量）发给队友，以房主为准；之后任一方按 F11 可再推送一次自己的进度。背包、地图、血量仍各自保存。`[World] SyncWorldOnJoin = false` 可关闭加入时的自动同步。
 
-协议升级为 5（`Hello` / `ChangeRoom` 追加关卡资源 GUID 与剧情传送标志），双方都要更新到 0.6.0。适用 Windows x64 / Steam build 25964535；完整包解压到含 `Carpenter.exe` 的目录，已装相同 BepInEx be.790 的用户可用 plugin-only 包。
+协议升级为 5（`Hello` / `ChangeRoom` 追加关卡资源 GUID 与剧情传送标志），双方都要更新到 0.6.0。适用 Windows x64 / Steam build 26489514（2026-11-08 游戏更新，已核对兼容）及旧版 25964535；完整包解压到含 `Carpenter.exe` 的目录，已装相同 BepInEx be.790 的用户可用 plugin-only 包。
 
 测试：Release 构建 0 警告 0 错误；共同存档状态机与储物箱协议 32 项模拟测试通过。剧情传送识别、F10/F11 及各捡各的规则依据游戏代码（`LevelManager`、`Actions.RaiseLevelTransitionEventChannel`、`LevelTransition.DoTransition`）离线核对，尚待双人实机验证；遇到问题请附上双方的 `BepInEx\LogOutput.log`。
