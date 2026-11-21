@@ -58,6 +58,7 @@ namespace SilverPinesCoop
         public readonly ConfigEntry<bool> SyncWorld;
         public readonly ConfigEntry<bool> SharedPickups;
         public readonly ConfigEntry<string> PerPlayerFlagWords;
+        public readonly ConfigEntry<string> SharedStorageKeys;
         public readonly ConfigEntry<bool> SyncWorldOnJoin;
         public readonly ConfigEntry<bool> FollowStoryTransitions;
         public readonly ConfigEntry<float> FollowDelay;
@@ -99,11 +100,12 @@ namespace SilverPinesCoop
                                      "On: an item picked up / taken from a container by one player is gone for everyone. " +
                                      "Off: every player picks up their own copy (inventories are per player).");
             PerPlayerFlagWords = cfg.Bind("World", "PerPlayerFlagWords", "Taken,PickedUp,Pickup,Collected,Looted",
-                                          "With SharedPickups off, story yes/no variables whose id contains one of these " +
-                                          "words (comma separated, any case) stay per player: they usually mark an item as taken.");
+                                          "Extra words marking a story variable as per-player with SharedPickups off " +
+                                          "(comma separated, any case).");
+            SharedStorageKeys = cfg.Bind("World", "SharedStorageKeys", "",
+                                         "Exact save entry keys of storage boxes to share with SharedPickups off, separated by commas.");
             SyncWorldOnJoin = cfg.Bind("World", "SyncWorldOnJoin", true,
-                                       "When a player joins, the host sends its whole world state (doors, puzzles, story " +
-                                       "variables) so both worlds start from the host's progress.");
+                                       "When a player joins, the host sends the world entries and story variables allowed by the sharing settings.");
             FollowStoryTransitions = cfg.Bind("World", "FollowStoryTransitions", true,
                                               "When the game's story moves the other player to another level while you are " +
                                               "in the same room, follow them there automatically.");

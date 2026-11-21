@@ -143,8 +143,8 @@ namespace SilverPinesCoop.Sync
                     if (!_entries.TryGetValue(pair.Value, out var entry) || entry.Layout == null ||
                         entry.Key != pair.Key || entry.Data == IntPtr.Zero)
                         continue;
-                    SendEntry(entry, peer);
-                    entries++;
+                    if (SendEntry(entry, peer))
+                        entries++;
                 }
             if (Plugin.Cfg.SyncStoryFlags.Value)
                 foreach (var variable in _variableById.Values)
@@ -163,6 +163,8 @@ namespace SilverPinesCoop.Sync
         {
             if (Plugin.Cfg.SharedPickups.Value || string.IsNullOrEmpty(id))
                 return false;
+            if (PickupSyncPolicy.IsPickupState(id))
+                return true;
             var source = Plugin.Cfg.PerPlayerFlagWords.Value ?? "";
             if (source != _flagWordsSource)
             {
@@ -280,9 +282,33 @@ namespace SilverPinesCoop.Sync
             return Il2CppRaw.Str(IL2CPP.il2cpp_class_get_name(Il2CppRaw.ClassOf(dataObj))) == "PersistentDataInventory";
         }
 
-        private void SendEntry(Entry entry, ulong peer = 0)
+        private static bool AllowsWorldEntry(string key, Il2CppRaw.Layout layout)
+        {
+            if (Plugin.Cfg.SharedPickups.Value)
+                return true;
+            if (!PickupSyncPolicy.AllowsWorldEntry(key, layout.Name))
+                return false;
+
+            // A shared-looking object can also persist the state of its loot.
+            for (var type = layout.Class; type != IntPtr.Zero; type = IL2CPP.il2cpp_class_get_parent(type))
+            {
+                var iterator = IntPtr.Zero;
+                IntPtr field;
+                while ((field = IL2CPP.il2cpp_class_get_fields(type, ref iterator)) != IntPtr.Zero)
+                {
+                    if ((IL2CPP.il2cpp_field_get_flags(field) & 0x50) == 0 &&   // FIELD_ATTRIBUTE_STATIC | LITERAL
+                        PickupSyncPolicy.IsPickupState(IL2CPP.il2cpp_field_get_name_(field)))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        private bool SendEntry(Entry entry, ulong peer = 0)
         {
             var layout = entry.Layout;
+            if (!AllowsWorldEntry(entry.Key, layout))
+                return false;
             var bytes = Il2CppRaw.Read(entry.Data, layout);
             void Body(BinaryWriter w)
             {
@@ -299,6 +325,7 @@ namespace SilverPinesCoop.Sync
                 _net.SendReliable(peer, PacketType.WorldEntry, Body);
             Sent++;
             Plugin.L.LogDebug($"World sync: sent {layout.Name} {entry.Key}");
+            return true;
         }
 
         private List<InventoryItemRecord> ReadInventory(IntPtr dataObj)
@@ -393,9 +420,13 @@ namespace SilverPinesCoop.Sync
             return hash;
         }
 
+        private static bool AllowsInventory(string key) =>
+            PickupSyncPolicy.AllowsInventory(Plugin.Cfg.SyncWorld.Value, Plugin.Cfg.SharedPickups.Value,
+                                             Plugin.Cfg.SharedStorageKeys.Value, key);
+
         private void SendInventory(string key, List<InventoryItemRecord> records)
         {
-            if (records == null || _net.LocalTestMode || !_net.CheckpointPeerCompatible)
+            if (records == null || _net.LocalTestMode || !_net.CheckpointPeerCompatible || !AllowsInventory(key))
                 return;
             byte[] payload;
             try { payload = InventorySnapshotCodec.Encode(key, records); }
@@ -423,7 +454,7 @@ namespace SilverPinesCoop.Sync
                 return;
             if (_net.IsHost ? sender != _net.PartnerId : sender != _net.HostId)
                 return;
-            if (!InventorySnapshotCodec.TryDecode(reader, out var key, out var records))
+            if (!InventorySnapshotCodec.TryDecode(reader, out var key, out var records) || !AllowsInventory(key))
                 return;
             var flatItems = new List<InventoryItemRecord>();
             foreach (var record in records)
@@ -572,6 +603,8 @@ namespace SilverPinesCoop.Sync
         {
             try
             {
+                if (!AllowsInventory(pending.Key))
+                    return;
                 var entryPtr = _entryByKey.TryGetValue(pending.Key, out var known) ? known : IntPtr.Zero;
                 if (entryPtr == IntPtr.Zero)
                     return;
@@ -711,14 +744,14 @@ namespace SilverPinesCoop.Sync
                 return;
             var klass = Il2CppRaw.FindClass(image, ns, name);
             var layout = klass == IntPtr.Zero ? null : Il2CppRaw.LayoutOf(klass);
-            if (layout != null && !Plugin.Cfg.SharedPickups.Value && PickupState.Contains(layout.OuterName))
-                return;   // the other side shares pickups, this side keeps them per player
             if (layout == null)
             {
                 if (_unknownClasses.Add(name))
                     Plugin.L.LogWarning($"World sync: class {name} ({image}) not found here");
                 return;
             }
+            if (!AllowsWorldEntry(key, layout))
+                return;
             if (!_entryByKey.TryGetValue(key, out var entryPtr))
             {
                 // the other player has been somewhere this save has not: create the entry for when we get there
