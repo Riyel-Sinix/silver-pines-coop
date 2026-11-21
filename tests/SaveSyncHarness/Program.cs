@@ -36,6 +36,9 @@ var tests = new (string Name, Action Run)[]
     ("shared inventory packet preserves item records", InventoryPacketRoundtrip),
     ("shared inventory packet rejects truncated fields", InventoryPacketRejectsTruncatedFields),
     ("shared inventory packet rejects invalid nested records", InventoryPacketRejectsInvalidRecord),
+    ("pickup and unclassified world state stays per player", PickupWorldEntries),
+    ("pickup story markers recognize common separators", PickupStoryMarkers),
+    ("only configured storage is shared in per-player mode", PickupStorageKeys),
 };
 var failures = 0;
 foreach (var test in tests)
@@ -640,4 +643,29 @@ static void InventoryPacketRejectsInvalidRecord()
     stream.Position = 0;
     using var reader = new BinaryReader(stream);
     Check.That(!InventorySnapshotCodec.TryDecode(reader, out _, out _), "invalid records are rejected without throwing");
+}
+
+static void PickupWorldEntries()
+{
+    Check.That(!PickupSyncPolicy.AllowsWorldEntry("guid", "ItemPickup/PersistentData"), "ground pickups stay per player");
+    Check.That(!PickupSyncPolicy.AllowsWorldEntry("guid", "Interactable/PersistentData"), "generic interaction state stays per player");
+    Check.That(PickupSyncPolicy.AllowsWorldEntry("guid", "NewSideDoor/PersistentData"), "door state can still sync");
+    Check.That(!PickupSyncPolicy.AllowsWorldEntry("guid-item-picked_up", "NewSideDoor/PersistentData"),
+        "a pickup key keeps a shared-looking entry local");
+}
+
+static void PickupStoryMarkers()
+{
+    Check.That(PickupSyncPolicy.IsPickupState("reward-claimed"), "reward marker stays per player");
+    Check.That(PickupSyncPolicy.IsPickupState("m_items_remaining"), "remaining loot stays per player");
+    Check.That(!PickupSyncPolicy.IsPickupState("DoorUnlocked"), "ordinary progression remains eligible");
+}
+
+static void PickupStorageKeys()
+{
+    Check.That(!PickupSyncPolicy.AllowsInventory(true, false, "", "loot-key"), "inventory is local by default");
+    Check.That(PickupSyncPolicy.AllowsInventory(true, false, "box-1, box-2", "box-2"), "a listed key is shared");
+    Check.That(!PickupSyncPolicy.AllowsInventory(true, false, "box-2", "box-2-loot"), "a prefix cannot authorize another inventory");
+    Check.That(PickupSyncPolicy.AllowsInventory(true, true, "", "loot-key"), "shared pickups retain the prior inventory policy");
+    Check.That(!PickupSyncPolicy.AllowsInventory(false, true, "box-2", "box-2"), "disabled world sync blocks inventories");
 }
