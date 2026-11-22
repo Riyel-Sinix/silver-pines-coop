@@ -36,6 +36,9 @@ var tests = new (string Name, Action Run)[]
     ("shared inventory packet preserves item records", InventoryPacketRoundtrip),
     ("shared inventory packet rejects truncated fields", InventoryPacketRejectsTruncatedFields),
     ("shared inventory packet rejects invalid nested records", InventoryPacketRejectsInvalidRecord),
+    ("progress transfer round-trips through chunks", ProgressRoundtrip),
+    ("progress transfer rejects corrupted, reordered and foreign chunks", ProgressRejects),
+    ("save keys split into GUID and component type", ProgressKeys),
 };
 var failures = 0;
 foreach (var test in tests)
@@ -640,4 +643,81 @@ static void InventoryPacketRejectsInvalidRecord()
     stream.Position = 0;
     using var reader = new BinaryReader(stream);
     Check.That(!InventorySnapshotCodec.TryDecode(reader, out _, out _), "invalid records are rejected without throwing");
+}
+
+static (byte[] Begin, List<byte[]> Chunks) Frames(string text, uint id)
+{
+    var packed = ProgressTransfer.Pack(id, text);
+    byte[] Write(Action<BinaryWriter> body)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, true))
+            body(writer);
+        return stream.ToArray();
+    }
+    var chunks = new List<byte[]>();
+    for (var i = 0; i < packed.Chunks; i++)
+    {
+        var index = i;
+        chunks.Add(Write(w => packed.WriteChunk(w, index)));
+    }
+    return (Write(packed.WriteBegin), chunks);
+}
+
+static BinaryReader Reader(byte[] bytes) => new(new MemoryStream(bytes));
+
+static string Big()
+{
+    var random = new Random(7);
+    var text = new System.Text.StringBuilder("guid-a,guid-b\n{\"m_dataEntries\":[");
+    for (var i = 0; i < 40000; i++)
+        text.Append("{\"m_guid\":\"").Append(random.Next()).Append(":Interactable\"},");
+    return text.Append("]}").ToString();
+}
+
+static void ProgressRoundtrip()
+{
+    var text = Big();
+    var (begin, chunks) = Frames(text, 42);
+    Check.That(chunks.Count > 1, "large progress spans several chunks");
+    var incoming = ProgressTransfer.Incoming.Begin(7, Reader(begin));
+    for (var i = 0; i < chunks.Count; i++)
+        Check.Equal(i == chunks.Count - 1, incoming.Add(7, Reader(chunks[i])), "only the last chunk completes the transfer");
+    Check.Equal(text, incoming.Finish(), "progress text round-trips");
+    foreach (var chunk in chunks)
+        Check.That(chunk.Length + 1 <= Packets.MaxMessageSize, "every chunk fits one network message");
+}
+
+static void ProgressRejects()
+{
+    var text = Big();
+    var (begin, chunks) = Frames(text, 1);
+    var reordered = ProgressTransfer.Incoming.Begin(7, Reader(begin));
+    Check.Throws(() => reordered.Add(7, Reader(chunks[1])), "out-of-order chunk is rejected");
+    var foreign = ProgressTransfer.Incoming.Begin(7, Reader(begin));
+    Check.Throws(() => foreign.Add(8, Reader(chunks[0])), "chunk from another sender is rejected");
+    var corrupt = ProgressTransfer.Incoming.Begin(7, Reader(begin));
+    for (var i = 0; i < chunks.Count; i++)
+    {
+        var bytes = (byte[])chunks[i].Clone();
+        if (i == 0)
+            bytes[^1] ^= 0x55;
+        corrupt.Add(7, Reader(bytes));
+    }
+    Check.Throws(() => corrupt.Finish(), "corrupted data fails the hash check");
+    var bad = (byte[])begin.Clone();
+    bad[4] = 0; bad[5] = 0; bad[6] = 0; bad[7] = 0;
+    Check.Throws(() => ProgressTransfer.Incoming.Begin(7, Reader(bad)), "zero-length header is rejected");
+}
+
+static void ProgressKeys()
+{
+    Check.That(ProgressTransfer.SplitKey("2bf9bd5c-1e73:Interactable", out var guid, out var type), "plain key splits");
+    Check.Equal("2bf9bd5c-1e73", guid, "plain key GUID");
+    Check.Equal("Interactable", type, "plain key type");
+    Check.That(ProgressTransfer.SplitKey("prefix:abc:ItemPickup", out guid, out type), "prefixed key splits");
+    Check.Equal("abc", guid, "prefixed key GUID");
+    Check.That(ProgressTransfer.PickupTypes.Contains(type), "ItemPickup is a pickup type");
+    Check.That(!ProgressTransfer.SplitKey("nocolon", out _, out _), "key without type is rejected");
+    Check.That(!ProgressTransfer.SplitKey("abc:", out _, out _), "key with empty type is rejected");
 }

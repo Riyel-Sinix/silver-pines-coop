@@ -171,6 +171,13 @@ internal sealed class World : IDisposable
 
 internal static class Check
 {
+    public static void Throws(Action action, string reason)
+    {
+        try { action(); }
+        catch (Exception) { return; }
+        throw new InvalidOperationException("Expected an exception: " + reason);
+    }
+
     public static void That(bool condition, string reason)
     {
         if (!condition) throw new InvalidOperationException(reason);

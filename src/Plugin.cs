@@ -17,7 +17,7 @@ namespace SilverPinesCoop
     {
         public const string Guid = "com.riyelsinix.silverpines.coop";
         public const string DisplayName = "Silver Pines Coop";
-        public const string Version = "0.6.0";
+        public const string Version = "0.7.0";
 
         internal static ManualLogSource L;
         internal static CoopConfig Cfg;
@@ -102,8 +102,9 @@ namespace SilverPinesCoop
                                           "With SharedPickups off, story yes/no variables whose id contains one of these " +
                                           "words (comma separated, any case) stay per player: they usually mark an item as taken.");
             SyncWorldOnJoin = cfg.Bind("World", "SyncWorldOnJoin", true,
-                                       "When a player joins, the host sends its whole world state (doors, puzzles, story " +
-                                       "variables) so both worlds start from the host's progress.");
+                                       "When a player joins, the host sends its whole progress (like sending the save file; " +
+                                       "each player keeps their own inventory, position and pickups), so both start from " +
+                                       "the host's progress.");
             FollowStoryTransitions = cfg.Bind("World", "FollowStoryTransitions", true,
                                               "When the game's story moves the other player to another level while you are " +
                                               "in the same room, follow them there automatically.");
@@ -120,7 +121,8 @@ namespace SilverPinesCoop
             TeleportKey = cfg.Bind("Keys", "TeleportToPartner", KeyCode.F10,
                                    "Go to the other player: their room (through the game's own level transition) and position.");
             PushWorldKey = cfg.Bind("Keys", "PushWorld", KeyCode.F11,
-                                    "Send your whole world state (doors, puzzles, story variables) to the other player.");
+                                    "Send your whole progress to the other player, like sending the save file (they keep " +
+                                    "their own inventory, position and pickups).");
             SaveCheckpointKey = cfg.Bind("Keys", "SaveCheckpoint", KeyCode.F9,
                                          "Save a shared co-op checkpoint to both players' local profiles.");
             LastCheckpointPeer = cfg.Bind("Save", "LastCheckpointPeer", "", "Managed by the mod: Steam partner of the committed checkpoint.");

@@ -53,7 +53,7 @@ namespace SilverPinesCoop.Sync
         private static LevelManager s_levelManager;
 
         /// <summary>LevelManager.IsLevelTransitionActive reads a static, but the interop exposes it per instance.</summary>
-        private static bool TransitionActive()
+        internal static bool TransitionActive()
         {
             if (s_levelManager == null)
                 s_levelManager = UnityEngine.Object.FindAnyObjectByType(Il2CppInterop.Runtime.Il2CppType.Of<LevelManager>())?.TryCast<LevelManager>();

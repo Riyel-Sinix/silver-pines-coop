@@ -18,6 +18,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
+    <!-- GUIDs of every scene object that gives the player an item, loot, money or lore (tools/scan_pickup_guids.py) -->
+    <EmbeddedResource Include="data/pickup_guids.txt" LogicalName="pickup_guids.txt" />
     <Reference Include="$(BepInExCore)\BepInEx.Core.dll" Private="false" />
     <Reference Include="$(BepInExCore)\BepInEx.Unity.Common.dll" Private="false" />
     <Reference Include="$(BepInExCore)\BepInEx.Unity.IL2CPP.dll" Private="false" />
@@ -31,6 +33,7 @@
     <Reference Include="$(InteropDir)\UnityEngine.DirectorModule.dll" Private="false" />
     <Reference Include="$(InteropDir)\UnityEngine.TextRenderingModule.dll" Private="false" />
     <Reference Include="$(InteropDir)\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="$(InteropDir)\UnityEngine.JSONSerializeModule.dll" Private="false" />
     <Reference Include="$(InteropDir)\Unity.Addressables.dll" Private="false" />
     <Reference Include="$(InteropDir)\Unity.ResourceManager.dll" Private="false" />
     <Reference Include="$(InteropDir)\CarpenterScripts.dll" Private="false" />

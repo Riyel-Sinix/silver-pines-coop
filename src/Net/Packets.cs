@@ -17,6 +17,8 @@ namespace SilverPinesCoop.Net
         StoryFlag = 14,     // ch1: a persistent story variable changed (WorldSync)
         CutsceneStart = 15, // ch1: the sender started a timeline cutscene (CutsceneSync)
         SharedInventory = 16, // ch1: shared storage inventory snapshot (WorldSync)
+        ProgressBegin = 17,   // ch1: a full progress transfer starts (ProgressSync)
+        ProgressChunk = 18,   // ch1: one chunk of it
         CheckpointSession = 20,
         CheckpointSaveRequest = 21,
         CheckpointSavePrepare = 22,
@@ -35,7 +37,7 @@ namespace SilverPinesCoop.Net
 
     public static class Packets
     {
-        public const ushort ProtocolVersion = 5;
+        public const ushort ProtocolVersion = 6;
         public const int ChannelUnreliable = 0;
         public const int ChannelReliable = 1;
         public const int MaxMessageSize = 64 * 1024;

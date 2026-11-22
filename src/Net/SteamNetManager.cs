@@ -88,6 +88,7 @@ namespace SilverPinesCoop.Net
         private bool _worldSuspended;
         private CutsceneSync _cutscenes;
         private FollowSync _follow;
+        private ProgressSync _progress;
         private bool _roomStory;            // the current room was reached through a story transition
         private string _notice;
         private float _noticeUntil;
@@ -356,6 +357,9 @@ namespace SilverPinesCoop.Net
             _save = new SaveSync(this, _pause);
             _cutscenes = new CutsceneSync(this);
             _follow = new FollowSync(this);
+            _progress = new ProgressSync(this, _world);
+            RegisterHandler(PacketType.ProgressBegin, _progress.OnBegin);
+            RegisterHandler(PacketType.ProgressChunk, _progress.OnChunk);
             RegisterHandler(PacketType.PauseState, _pause.OnState);
             RegisterHandler(PacketType.WorldEntry, OnWorldEntry);
             RegisterHandler(PacketType.SharedInventory, OnSharedInventory);
@@ -401,7 +405,7 @@ namespace SilverPinesCoop.Net
                 var h = _noticeStyle.fontSize * 3f;
                 GUI.Box(new Rect((Screen.width - w) / 2f, Screen.height * 0.4f, w, h), notice, _noticeStyle);
             }
-            var message = _follow?.Notice;
+            var message = _progress?.Notice ?? _follow?.Notice;
             if (string.IsNullOrEmpty(message) && _notice != null && Time.realtimeSinceStartup < _noticeUntil)
                 message = _notice;
             if (!string.IsNullOrEmpty(message))
@@ -518,6 +522,12 @@ namespace SilverPinesCoop.Net
             _pause.Update(now, Connected);
             _follow.Watch(now);
             _follow.Update(now, _roomHash);
+            _progress.Update(now);
+            if (_progress.Loaded)
+            {
+                _world.ResetBaseline();   // the loaded progress is the new baseline: do not send it back
+                _enemySync.ResetBaseline();
+            }
 
             _tickAccumulator += Time.unscaledDeltaTime;
             var interval = 1f / Mathf.Clamp(Plugin.Cfg.TickRate.Value, 1, 60);
@@ -616,8 +626,9 @@ namespace SilverPinesCoop.Net
                     _scratch.Add(peer);
             foreach (var peer in _scratch)
             {
+                if (!_progress.Send(peer, quiet: true) && _progress.BlockedReason() != null)
+                    continue;   // e.g. a cutscene or menu here: try again on a later tick
                 _snapshotDue.Remove(peer);
-                _world.QueueSnapshot(peer);
             }
         }
 
@@ -665,12 +676,9 @@ namespace SilverPinesCoop.Net
                 _follow.Request(FirstPeer(), Time.realtimeSinceStartup);
             if (input.GetKeyDown(Plugin.Cfg.PushWorldKey.Value) && Connected)
             {
-                if (_save.SuppressWorldSync)
-                    ShowNotice("正在共同存读档，稍后再同步世界进度");
-                else
-                    foreach (var member in _members)
-                        if (member != _self)
-                            _world.QueueSnapshot(member);
+                foreach (var member in _members)
+                    if (member != _self)
+                        _progress.Send(member);
             }
         }
 
@@ -1254,7 +1262,7 @@ namespace SilverPinesCoop.Net
                         break;
                 }
             if (Connected)
-                text += $"\n[{Plugin.Cfg.TeleportKey.Value}] 传送到队友　[{Plugin.Cfg.PushWorldKey.Value}] 把我的世界进度发给队友" +
+                text += $"\n[{Plugin.Cfg.TeleportKey.Value}] 传送到队友　[{Plugin.Cfg.PushWorldKey.Value}] 把我的进度发给队友" +
                         $"\n同步：世界 发{_world.Sent}/收{_world.Applied}　敌人 发{_enemySync.Sent}/收{_enemySync.Applied}（本房间 {_enemySync.Tracked}）";
             if (_save != null && !string.IsNullOrEmpty(_save.Status))
                 text += "\n" + _save.Status;

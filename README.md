@@ -1,15 +1,15 @@
 # Silver Pines Coop（银松镇联机 Mod）
 
 BepInEx 6（IL2CPP，be.790）插件。走 Steam 大厅 + SteamNetworkingMessages，在同一个房间里能看到另一位玩家（2P 傀儡）。
-目标版本：Windows x64，Steam 构建 **26489514**（2026-11-08 更新；0.6.0 同样适用于旧构建 25964535），Unity 6000.3.15f1，metadata v39。双方都需要拥有游戏，并使用相同的游戏版本和 Mod 版本。
+目标版本：Windows x64，Steam 构建 **26489514**（2026-11-08 更新；也适用于旧构建 25964535），Unity 6000.3.15f1，metadata v39。双方都需要拥有游戏，并使用相同的游戏版本和 Mod 版本。
 
-当前版本 **0.6.0**。共同存档、死亡共同回档和共享储物箱尚未经过真实双人 Steam 联机验证，建议先用测试 profile，并保留独立存档备份。现有功能包括大厅、P2P 传输、玩家外观与位置同步、一个人双开测试，以及：
+当前版本 **0.7.0**。共同存档、死亡共同回档和共享储物箱尚未经过真实双人 Steam 联机验证，建议先用测试 profile，并保留独立存档备份。现有功能包括大厅、P2P 传输、玩家外观与位置同步、一个人双开测试，以及：
 - 暂停状态：暂停菜单和过场不会冻结队友；队友傀儡上方显示「正在暂停」或「正在看过场」；
 - 过场同步：在同一个房间时，一人触发过场，其他人一起播放同一段动画；
 - 世界同步：通过游戏自己的存档数据同步门、可交互物、剧情触发、谜题等已观测到的状态变化；不在同一房间时也会记下，进入房间时生效，覆盖范围见「已知限制」；
-- 道具各捡各的（0.6.0）：拾取物、容器、钱和收集品按人计，一人捡走后另一人仍能捡到自己的那份（可在配置里改回共享）；
+- 道具各捡各的（0.6.0，0.7.0 修复）：拾取物、容器、钱和收集品按人计，一人捡走后另一人仍能捡到自己的那份（可在配置里改回共享）；
 - 跟随剧情传送（0.6.0）：剧情把队友单独带到别的场景时自动跟过去，F10 随时传送到队友身边；
-- 进度同步（0.6.0）：加入时房主自动下发世界状态，F11 手动推送，不必再互发存档；
+- 进度同步（0.7.0）：加入时房主自动发送整份进度，F11 手动发送，相当于互发存档但保留各自背包、位置和自己捡的东西；
 - 剧情变量同步（存档里的 是/否 变量）；
 - 怪物：同房间内的伤害和死亡同步（一边打死，两边都死）；
 - 共享储物箱：Steam 双人联机时，由房主协调箱内物品、数量和库存位置；个人背包仍各自独立；
@@ -39,16 +39,17 @@ BepInEx 6（IL2CPP，be.790）插件。走 Steam 大厅 + SteamNetworkingMessage
 | F8 | 开/关本地镜像测试：在自己旁边复制一个自己，单人就能检查傀儡的显示 |
 | F9 | 请求双方共同存档：由房主调用游戏自己的轮换选槽逻辑，再协调双方保存到同一槽位索引 |
 | F10 | 传送到队友：不同场景时走游戏自己的切换场景流程，到达后站到队友的位置 |
-| F11 | 把自己的世界进度（门、谜题、剧情变量等）推给队友 |
+| F11 | 把自己的整份进度发给队友（游戏存档格式，对方自动载入，保留对方的个人数据） |
 
 好友接受邀请（游戏开着时收到 `GameLobbyJoinRequested_t`，没开时 Steam 带 `+connect_lobby <id>` 启动游戏）就会自动进房间。
 
-### 道具、剧情传送与进度同步（0.6.0）
+### 道具、剧情传送与进度同步（0.6.0 / 0.7.0）
 
-- **道具各捡各的。** 拾取物（`ItemPickup`）、容器（`InteractableLootContainerCommand`、`ShootableLootContainer`）、钱（`InteractablePickupMoneyCommand`）和收集品（`LorePickup`）的状态不再同步：一人捡走后，另一人那边仍在，可以捡自己的。剧情变量 id 含 `Taken/PickedUp/Pickup/Collected/Looted` 的（通常表示某道具已被拿走）也按人计。配置 `[World] SharedPickups = true` 恢复共享，`PerPlayerFlagWords` 调整关键词。门、谜题、开关、剧情进度仍然共享。
+- **道具各捡各的。** 拾取物（`ItemPickup`）、容器（`InteractableLootContainerCommand`、`ShootableLootContainer`）、钱（`InteractablePickupMoneyCommand`）和收集品（`LorePickup`）的状态不再同步：一人捡走后，另一人那边仍在，可以捡自己的。一个道具在存档里往往有好几条记录（如 `Item_Key_PlayerCar`：`Interactable`，命令为 `InteractablePickupItemCommand` + `InteractableDisableSelfCommand`，外加 `ItemPickup`），0.6.0 只停了 `ItemPickup` 那条，`Interactable` 的“已互动 / 已禁用”仍被同步，于是另一人那边道具还在却捡不了。0.7.0 按物体（存档 key `[前缀:]GUID:组件类型` 里的 GUID）整体判定：同一 GUID 下有拾取类记录，或已加载物体带拾取组件 / 拾取类交互命令（`InteractablePickup*`、`*LootContainer*`），该物体的所有记录都按人计。剧情变量 id 含 `Taken/PickedUp/Pickup/Collected/Looted` 的（通常表示某道具已被拿走）也按人计。配置 `[World] SharedPickups = true` 恢复共享，`PerPlayerFlagWords` 调整关键词。门、谜题、开关、剧情进度仍然共享。
 - **跟随剧情传送。** 剧情脚本切换场景时，游戏发出的切换事件不带门或出口组件（`Actions.RaiseLevelTransitionEventChannel`），插件据此在 `ChangeRoom` 里标记“剧情传送”。原来同房间的队友会看到提示，`FollowDelay`（默认 3 秒）后自动跟过去；在过场、菜单、切换场景或共同存读档中会等可以行动再走。`[World] FollowStoryTransitions = false` 关闭。
 - **F10 传送到队友。** 同一场景直接移到队友位置；不同场景时按队友报告的关卡资源 GUID 加载 `LevelMetadata`，发出和剧情脚本相同的切换场景事件，由游戏自己加载场景，到达后再移到队友最近一次同步的位置。
-- **进度同步。** 双方都进入存档后，房主把自己全部可同步的世界条目和剧情变量发给新加入的队友（已相同的条目不会让物体重读），以房主进度为准；之后任一方按 F11 可再推送一次。背包、地图、血量、储物箱以外的个人数据不变。`[World] SyncWorldOnJoin = false` 关闭加入时的自动同步。
+- **进度同步（0.7.0 重写）。** 游戏的存档槽就是 `JsonUtility.ToJson(PersistentDataStore.GetPopulatedPersistentData())`（`SaveSlotSegment.Serialise`），读档是 `PopulateFromLoadedPersistentData` + `SaveDataManager.ReloadState`（`OnLoadGameCallback`）。发送方用同样方式取出整份进度，gzip 压缩、SHA-256 校验后分块（`ProgressBegin` / `ProgressChunk`）发出；接收方在可以行动时合并并走游戏自己的读档流程重载当前场景。合并时保留接收方自己的：所在关卡与位置、主背包、储物箱、收藏/日志、地图标记、状态效果、统计、难度、自己角色的条目，以及所有按人计的拾取物条目和按人计的剧情变量。0.6.0 的逐条快照只覆盖已加载过的变量和条目，未在对方进程注册的剧情变量会被丢弃，这是 F11 看起来不生效的原因。双方都进入存档后房主自动发送一次，之后任一方按 F11 再发送。不写盘。`[World] SyncWorldOnJoin = false` 关闭加入时的自动发送。
+- **首次写入的状态。** 有些物体只有被使用时才创建自己的存档数据；0.6.0 把“从无到有”一律当作基线，不会发送。0.7.0 在条目出现超过 2 秒、且距最近一次进入或载入场景超过 3 秒后，把首次写入当作玩家操作同步出去。
 
 ### 共享储物箱（0.5.0）
 
@@ -142,7 +143,7 @@ dotnet build -c Release -p:BepInExCore=<BepInEx be.790 解压目录>\BepInEx\cor
 - **2P 不闪、不消失。** 傀儡沿相机视线方向后移 0.05（`PuppetDepthOffset`），两个角色重叠时排序稳定；精灵在换房间后第一次
   查不到时，把所有已加载精灵建一次索引，查不到的帧保留上一帧（之前疾跑时对方会消失：这一帧本地还没画过，最多要等 2 秒才找到）。
 
-## 协议（ProtocolVersion 5，小端，第一个字节是 `PacketType`）
+## 协议（ProtocolVersion 6，小端，第一个字节是 `PacketType`）
 
 | 类型 | 通道 | 内容 |
 |---|---|---|
@@ -155,6 +156,8 @@ dotnet build -c Release -p:BepInExCore=<BepInEx be.790 解压目录>\BepInEx\cor
 | `StoryFlag` = 14 | 1 | u8 种类（0 bool，1 int，2 float）、持久 id、u64 值 |
 | `CutsceneStart` = 15 | 1 | u32 房间 hash、`场景:层级路径`、f64 播放时间 |
 | `SharedInventory` = 16 | 1 | 持久 key、物品数；每件物品含类型、定义 GUID、可序列化值字段 |
+| `ProgressBegin` = 17 | 1 | u32 传输 id、u32 压缩长度、u32 原文长度、u16 分块数、32 字节 SHA-256 |
+| `ProgressChunk` = 18 | 1 | u32 传输 id、u16 序号、u16 长度、数据（gzip 后的「拾取物 GUID 列表一行 + 存档 JSON」） |
 | `Checkpoint*` = 20…33 | 1 | 共同存档会话、请求、准备、就绪、执行、结果确认、完成、取消及死亡通知；携带会话与操作标识，按消息附加 checkpoint 标识和槽位 |
 
 hash 都用 UTF-8 FNV-1a（`Packets.Hash`），保证两台机器算出来一致。新的可靠消息用
@@ -164,7 +167,7 @@ hash 都用 UTF-8 FNV-1a（`Packets.Hash`），保证两台机器算出来一致
 
 - 怪物的 AI 和位置各算各的：每边的怪只追自己世界里的玩家，只有血量和死亡是共享的。要真正共享怪物，需要由房主模拟，
   另一边只驱动“怪物傀儡”，并让 AI 能把远端玩家当目标，这是下一步。
-- 加入时房主下发的是当前世界条目和剧情变量，以房主为准；队友先于房主推进过的状态会被房主的覆盖。首次发现或被替换的存档数据对象会成为新基线，相关变化可能遗漏，可按 F11 再推送一次。
+- 加入时和按 F11 时以发送方进度为准，接收方先于发送方推进过的共享状态会被覆盖（个人数据除外）。从未加载过、只靠交互命令识别的拾取物，若双方都没见过，可能仍按发送方状态处理。
 - 双方同时伤害同一怪物时，收到远端伤害可能覆盖本地尚未发送的伤害基线，伤害叠加和双方血量一致性不能保证。
 - 运行时生成的东西（掉落物、刷出来的怪）两边 GUID 不同，不同步。个人背包、地图、血量各人是各人的；同一储物箱请避免同时整理。
 - 对方的手电光束（3D Light）不会显示，只显示精灵。
@@ -190,6 +193,8 @@ hash 都用 UTF-8 FNV-1a（`Packets.Hash`），保证两台机器算出来一致
 | `src/Sync/PauseSync.cs` / `CutsceneSync.cs` | 暂停 / 过场同步 |
 | `src/Sync/SaveSync.cs` | 双方共同存读档协调、死亡回档、checkpoint 校验与恢复 |
 | `src/Sync/FollowSync.cs` | 剧情传送识别、自动跟随、F10 传送到队友 |
+| `src/Sync/ProgressSync.cs` / `ProgressTransfer.cs` | 整份进度发送、合并个人数据、走游戏读档流程载入；分块、压缩与校验 |
+| `data/pickup_guids.txt` | 从全部关卡场景提取的拾取类物体 GUID（`tools/scan_pickup_guids.py`，需 UnityPy），内嵌进插件，未加载的房间也能按人计 |
 | `src/Game/Il2CppRaw.cs` | 用 IL2CPP 运行时 API 直接读写数据类的值字段、List 内部 |
 | `src/Game/GameAccess.cs` | 菜单标志、过场标志、TimeScaleManager、存档存储 |
 | `src/Game/FocusPauseHook.cs` | 切窗口不暂停（SuspendService.OnFocusChanged 的 detour） |

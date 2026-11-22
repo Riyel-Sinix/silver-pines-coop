@@ -50,6 +50,7 @@ namespace SilverPinesCoop.Sync
             public Il2CppRaw.Layout Layout;   // null: not synced
             public ulong Hash;
             public bool Inventory;
+            public float FirstSeen;           // first scan that saw this entry
         }
 
         private sealed class PendingInventory
@@ -92,7 +93,12 @@ namespace SilverPinesCoop.Sync
         private float _nextIdentifierRefresh;
         private uint _identifierRoom;
         private bool _loggedInventory;
-        private ulong _snapshotPeer;
+        private readonly HashSet<string> _pickupGuids = new();   // objects whose state means "this player took it"
+        private readonly HashSet<string> _plainGuids = new();    // loaded objects checked and found not to be pickups
+        private float _now;
+        private uint _lastRoom;
+        private float _roomChangedAt;
+        private float _lastClassifyRefresh = -100f;
         private string _flagWordsSource;
         private string[] _flagWords = Array.Empty<string>();
 
@@ -102,6 +108,28 @@ namespace SilverPinesCoop.Sync
         public WorldSync(SteamNetManager net)
         {
             _net = net;
+            LoadKnownPickups();
+        }
+
+        /// <summary>Scene objects known from the game data to give the player something (also unloaded ones).</summary>
+        private void LoadKnownPickups()
+        {
+            try
+            {
+                using var stream = typeof(WorldSync).Assembly.GetManifestResourceStream("pickup_guids.txt");
+                if (stream == null)
+                    return;
+                using var reader = new StreamReader(stream);
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                    if (line.Length > 0)
+                        _pickupGuids.Add(line.Trim());
+                Plugin.L.LogInfo($"World sync: {_pickupGuids.Count} known pickup objects");
+            }
+            catch (Exception e)
+            {
+                Plugin.L.LogWarning($"World sync: pickup list not loaded: {e.Message}");
+            }
         }
 
         public void ResetBaseline() => _data = IntPtr.Zero;
@@ -112,6 +140,12 @@ namespace SilverPinesCoop.Sync
             if (now < _nextPoll)
                 return;
             _nextPoll = now + PollInterval;
+            _now = now;
+            if (_net.RoomHash != _lastRoom || FollowSync.TransitionActive())
+            {
+                _lastRoom = _net.RoomHash;
+                _roomChangedAt = now;   // loading (also reloading the same level) is not a player action
+            }
             var store = GameAccess.DataStore;
             if (store == null)
                 return;
@@ -124,42 +158,10 @@ namespace SilverPinesCoop.Sync
                 ScanEntries(connected);
             if (Plugin.Cfg.SyncStoryFlags.Value)
                 ScanVariables(store, connected);
-            if (_snapshotPeer != 0 && connected)
-                SendSnapshot();
-        }
-
-        /// <summary>Send our whole world state to <paramref name="peer"/> on the next poll (after the baseline scan).</summary>
-        public void QueueSnapshot(ulong peer) => _snapshotPeer = peer;
-
-        private void SendSnapshot()
-        {
-            var peer = _snapshotPeer;
-            _snapshotPeer = 0;
-            var entries = 0;
-            var flags = 0;
-            if (Plugin.Cfg.SyncWorld.Value)
-                foreach (var pair in _entryByKey)
-                {
-                    if (!_entries.TryGetValue(pair.Value, out var entry) || entry.Layout == null ||
-                        entry.Key != pair.Key || entry.Data == IntPtr.Zero)
-                        continue;
-                    SendEntry(entry, peer);
-                    entries++;
-                }
-            if (Plugin.Cfg.SyncStoryFlags.Value)
-                foreach (var variable in _variableById.Values)
-                {
-                    if ((variable.Kind != 0 && !Plugin.Cfg.SyncStoryNumbers.Value) || PerPlayerFlag(variable.Id))
-                        continue;
-                    SendVariable(variable, peer, false);
-                    flags++;
-                }
-            Plugin.L.LogInfo($"World snapshot sent to {_net.PeerName(peer)}: {entries} save entries, {flags} story variables");
-            _net.ShowNotice($"已把世界进度发给 {_net.PeerName(peer)}（{entries} 项物体状态，{flags} 个剧情变量）");
         }
 
         /// <summary>Story variables that mark an item as taken stay per player while pickups are per player.</summary>
-        private bool PerPlayerFlag(string id)
+        public bool PerPlayerFlag(string id)
         {
             if (Plugin.Cfg.SharedPickups.Value || string.IsNullOrEmpty(id))
                 return false;
@@ -216,14 +218,21 @@ namespace SilverPinesCoop.Sync
                 var keyPtr = Il2CppRaw.ReadPointer(entryPtr, _entryKeyOffset);
                 if (!_entries.TryGetValue(entryPtr, out var entry) || entry.KeyPtr != keyPtr)
                 {
-                    entry = new Entry { KeyPtr = keyPtr, Key = Il2CppRaw.ManagedString(keyPtr) };
+                    entry = new Entry { KeyPtr = keyPtr, Key = Il2CppRaw.ManagedString(keyPtr), FirstSeen = _now };
                     _entries[entryPtr] = entry;
+                    if (ProgressTransfer.SplitKey(entry.Key, out var keyGuid, out var keyType) &&
+                        ProgressTransfer.PickupTypes.Contains(keyType))
+                        _pickupGuids.Add(keyGuid);
                 }
                 if (entry.Key != null)
                     _entryByKey[entry.Key] = entryPtr;   // the entry currently in the list wins
                 if (entry.Data != dataObj)
                 {
-                    // first sight, or the owner created / replaced its data object: that is the baseline, not a change
+                    // first sight, or the owner created / replaced its data object: that is the baseline, not a change.
+                    // Exception: an object that writes its state only when used (no data until then) creating it well
+                    // after its room finished loading - that is the player using it.
+                    var firstWrite = entry.Data == IntPtr.Zero && dataObj != IntPtr.Zero && entry.Key != null &&
+                                     _now - entry.FirstSeen > 2f && _now - _roomChangedAt > 3f;
                     entry.Data = dataObj;
                     entry.Inventory = IsSharedInventory(dataObj);
                     entry.Layout = entry.Inventory ? null : Syncable(dataObj);
@@ -231,6 +240,8 @@ namespace SilverPinesCoop.Sync
                         entry.Layout == null ? 0 : Il2CppRaw.Hash(dataObj, entry.Layout);
                     if (entry.Inventory && connected && _net.IsHost && entry.Key != null)
                         SendInventory(entry.Key, ReadInventory(dataObj));
+                    else if (firstWrite && connected && entry.Layout != null && !IsPerPlayer(entry.Key))
+                        SendEntry(entry);
                     continue;
                 }
                 if (entry.Inventory)
@@ -253,7 +264,7 @@ namespace SilverPinesCoop.Sync
                 if (hash == entry.Hash)
                     continue;
                 entry.Hash = hash;
-                if (connected)
+                if (connected && !IsPerPlayer(entry.Key))
                     SendEntry(entry);
             }
             if (!_loggedInventory && count > 0)
@@ -261,6 +272,99 @@ namespace SilverPinesCoop.Sync
                 _loggedInventory = true;
                 Plugin.L.LogInfo($"World sync: {count} save entries, {synced} with syncable state");
             }
+        }
+
+        /// <summary>
+        /// Whether the entry belongs to an object that is picked up per player: an item, money, lore or loot container.
+        /// Such an object keeps several entries under one GUID - e.g. Item_Key_PlayerCar has PersistentDataIdentifier,
+        /// Interactable (InteractablePickupItemCommand + InteractableDisableSelfCommand) and ItemPickup - and the
+        /// Interactable's "interaction done / disabled" state would otherwise make the other player's copy unusable.
+        /// Known from a pickup-type key under the same GUID, or from the loaded object's components and commands.
+        /// </summary>
+        public bool IsPerPlayer(string key)
+        {
+            if (Plugin.Cfg.SharedPickups.Value || !ProgressTransfer.SplitKey(key, out var guid, out var type))
+                return false;
+            if (ProgressTransfer.PickupTypes.Contains(type))
+            {
+                _pickupGuids.Add(guid);
+                return true;
+            }
+            return IsPerPlayerGuid(guid);
+        }
+
+        /// <summary>Pickup objects learned this session (sent along with a progress transfer).</summary>
+        public IEnumerable<string> PickupGuids => _pickupGuids;
+
+        public void MarkPickup(string guid)
+        {
+            if (!string.IsNullOrEmpty(guid))
+            {
+                _plainGuids.Remove(guid);
+                _pickupGuids.Add(guid);
+            }
+        }
+
+        public bool IsPerPlayerGuid(string guid)
+        {
+            if (Plugin.Cfg.SharedPickups.Value || string.IsNullOrEmpty(guid))
+                return false;
+            if (_pickupGuids.Contains(guid))
+                return true;
+            if (_plainGuids.Contains(guid))
+                return false;
+            var now = Time.realtimeSinceStartup;
+            if (now - _lastClassifyRefresh > 1f || _identifierRoom != _net.RoomHash)
+            {
+                _lastClassifyRefresh = now;
+                RefreshIdentifiers(_net.RoomHash, now);
+            }
+            foreach (var (id, identifier) in _identifiers)
+            {
+                if (id != guid || identifier == null)
+                    continue;
+                bool pickup;
+                try
+                {
+                    pickup = IsPickupObject(identifier.gameObject);
+                }
+                catch (Exception e)
+                {
+                    Plugin.L.LogDebug($"Pickup check for {guid} failed: {e.Message}");
+                    return false;
+                }
+                (pickup ? _pickupGuids : _plainGuids).Add(guid);
+                return pickup;
+            }
+            return false;   // not loaded here: unknown, decided again later
+        }
+
+        private static bool IsPickupObject(GameObject go)
+        {
+            if (go == null)
+                return false;
+            // PersistentDataIdentifier.UpdateFromDatastore persists only the components on its own GameObject
+            if (go.GetComponent(Il2CppType.Of<ItemPickup>()) != null ||
+                go.GetComponent(Il2CppType.Of<LorePickup>()) != null ||
+                go.GetComponent(Il2CppType.Of<ShootableLootContainer>()) != null)
+                return true;
+            foreach (var component in go.GetComponents(Il2CppType.Of<Interactable>()))
+            {
+                var commands = component?.TryCast<Interactable>()?.m_interactableCommands;
+                if (commands == null)
+                    continue;
+                for (var i = 0; i < commands.Count; i++)
+                {
+                    var command = commands[i];
+                    if (command == null)
+                        continue;
+                    var name = Il2CppRaw.Str(IL2CPP.il2cpp_class_get_name(Il2CppRaw.ClassOf(command.Pointer))) ?? "";
+                    if (name.StartsWith("InteractablePickup", StringComparison.Ordinal) ||
+                        name.Contains("LootContainer", StringComparison.Ordinal))
+                        return true;
+                }
+            }
+            return false;
         }
 
         private static Il2CppRaw.Layout Syncable(IntPtr dataObj)
@@ -707,7 +811,7 @@ namespace SilverPinesCoop.Sync
             var ns = r.ReadString();
             var name = r.ReadString();
             var bytes = r.ReadBytes(r.ReadUInt16());
-            if (!Plugin.Cfg.SyncWorld.Value || _data == IntPtr.Zero || _entryDataOffset < 0)
+            if (!Plugin.Cfg.SyncWorld.Value || _data == IntPtr.Zero || _entryDataOffset < 0 || IsPerPlayer(key))
                 return;
             var klass = Il2CppRaw.FindClass(image, ns, name);
             var layout = klass == IntPtr.Zero ? null : Il2CppRaw.LayoutOf(klass);
